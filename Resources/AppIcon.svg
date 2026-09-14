@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect x="48" y="48" width="928" height="928" rx="210" fill="#EEF5FB"/>
+  <!-- folded map -->
+  <path d="M155 305 L350 250 L512 315 L674 250 L869 305 L869 770 L674 715 L512 780 L350 715 L155 770 Z" fill="#FFFDF7" stroke="#18324D" stroke-width="28" stroke-linejoin="round"/>
+  <path d="M350 250 L350 715 M512 315 L512 780 M674 250 L674 715" fill="none" stroke="#D6DEE7" stroke-width="12"/>
+  <!-- map routes -->
+  <path d="M155 475 L270 430 L350 475 L430 420 L512 455" fill="none" stroke="#3F83D9" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M155 650 L255 610 L350 535 L430 555 L512 520 L600 550 L674 505 L770 525 L869 480" fill="none" stroke="#E26B68" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M350 300 L410 365 L430 420 L512 455 L570 410 L674 360 L760 400 L869 355" fill="none" stroke="#56A56A" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- nodes -->
+  <g fill="#FFFDF7" stroke-width="18">
+    <circle cx="270" cy="430" r="27" stroke="#3F83D9"/>
+    <circle cx="430" cy="420" r="27" stroke="#3F83D9"/>
+    <circle cx="350" cy="535" r="27" stroke="#E26B68"/>
+    <circle cx="600" cy="550" r="27" stroke="#E26B68"/>
+    <circle cx="570" cy="410" r="27" stroke="#56A56A"/>
+  </g>
+  <!-- stethoscope -->
+  <path d="M395 165 C395 165 395 330 395 405 C395 505 465 570 560 570 C655 570 725 505 725 405 L725 260" fill="none" stroke="#142B47" stroke-width="54" stroke-linecap="round"/>
+  <path d="M395 165 C395 135 415 112 445 112 M725 260 C725 230 705 208 675 208" fill="none" stroke="#142B47" stroke-width="38" stroke-linecap="round"/>
+  <path d="M395 165 L395 130 M725 260 L725 225" stroke="#142B47" stroke-width="34" stroke-linecap="round"/>
+  <path d="M560 570 L560 700 C560 765 615 810 680 810 C745 810 790 770 790 715" fill="none" stroke="#142B47" stroke-width="54" stroke-linecap="round"/>
+  <circle cx="790" cy="690" r="92" fill="#142B47"/>
+  <circle cx="790" cy="690" r="57" fill="#EEF5FB"/>
+  <circle cx="790" cy="690" r="29" fill="#AAB8C8"/>
+</svg>

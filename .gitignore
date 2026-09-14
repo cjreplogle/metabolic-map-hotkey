@@ -1,0 +1,6 @@
+# Build output
+MetabolicMap.app/
+AppIcon.iconset/
+
+# macOS
+.DS_Store

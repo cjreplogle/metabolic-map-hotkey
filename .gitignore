@@ -4,3 +4,6 @@ AppIcon.iconset/
 
 # macOS
 .DS_Store
+
+# Release artifact
+MetabolicMap.zip

@@ -1,4 +1,4 @@
-# A Quick-access Metabolic Pathway Viewer.
+# A Quick-Access Metabolic Pathway Viewer.
 
 A tiny native AppKit/SwiftUI/PDFKit viewer for a local copy of the Stanford
 Pathways of Human Metabolism PDF. It lives in the menu bar, pops the map

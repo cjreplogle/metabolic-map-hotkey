@@ -1,4 +1,4 @@
-## A Quick-access Metabolic Pathway Viewer.
+# A Quick-access Metabolic Pathway Viewer.
 
 A tiny native AppKit/SwiftUI/PDFKit viewer for a local copy of the Stanford
 Pathways of Human Metabolism PDF. It lives in the menu bar, pops the map
@@ -10,7 +10,7 @@ zoom, pan, and a cursor "peek-through" so you can glance at what's behind it.
 > On first launch the app asks you to pick your local copy and remembers it; the
 > tray menu also has a shortcut to the download page.
 
-### Download
+## Download
 
 Grab the prebuilt app from the
 [latest release](https://github.com/cjreplogle/metabolic-map-hotkey/releases/latest):
@@ -23,7 +23,7 @@ Grab the prebuilt app from the
 
 Requires macOS 14+.
 
-### Permissions
+## Permissions
 
 The global shortcuts use a keyboard event tap, which macOS gates behind:
 
@@ -32,7 +32,7 @@ The global shortcuts use a keyboard event tap, which macOS gates behind:
 Enable **MetabolicMap** there. The app polls for the permission, so it starts
 working the moment you toggle it on — no relaunch needed.
 
-### Shortcuts
+## Shortcuts
 
 Global (work from any app):
 
@@ -47,7 +47,7 @@ Inside the map window:
 - **⌘ + arrows** — pan
 - **⌘⇧ + arrows** — move the window around the screen
 
-### Features
+## Features
 
 - Menu-bar app; the map opens over full-screen Spaces and can be pinned
   **Always on Top**.

@@ -1,6 +1,7 @@
 import Cocoa
 import SwiftUI
 import PDFKit
+import ServiceManagement
 
 // MARK: - App icon
 
@@ -29,31 +30,284 @@ func configureWindowAppearance(_ window: NSWindow) {
     }
 }
 
-/// App-wide user settings shared across windows.
-enum AppSettings {
-    static var alwaysOnTop = false
-    static var peekEnabled = true
+/// User-adjustable settings, persisted to UserDefaults and applied live.
+final class AppSettings: ObservableObject {
+    static let shared = AppSettings()
+    private let defaults = UserDefaults.standard
+
+    @Published var alwaysOnTop: Bool {
+        didSet {
+            defaults.set(alwaysOnTop, forKey: "alwaysOnTop")
+            MapWindowController.shared.setAlwaysOnTop(alwaysOnTop)
+        }
+    }
+
+    @Published var peekEnabled: Bool {
+        didSet {
+            defaults.set(peekEnabled, forKey: "peekEnabled")
+            MapWindowController.shared.refreshPeek()
+        }
+    }
+
+    // Registers/unregisters the app as a macOS login item (starts in the
+    // background at login; the map only appears when the shortcut is pressed).
+    @Published var launchAtLogin: Bool {
+        didSet { updateLoginItem() }
+    }
+
+    private func updateLoginItem() {
+        do {
+            if launchAtLogin {
+                if SMAppService.mainApp.status != .enabled { try SMAppService.mainApp.register() }
+            } else {
+                if SMAppService.mainApp.status == .enabled { try SMAppService.mainApp.unregister() }
+            }
+        } catch {
+            print("Login item update failed: \(error)")
+        }
+    }
+
+    @Published var peekRadius: Double {
+        didSet { defaults.set(peekRadius, forKey: "peekRadius"); MapWindowController.shared.refreshPeek() }
+    }
+    // 0 = fully opaque map in the hole, 1 = fully transparent (see-through).
+    @Published var peekTransparency: Double {
+        didSet { defaults.set(peekTransparency, forKey: "peekTransparency"); MapWindowController.shared.refreshPeek() }
+    }
+    // Width (points) of the soft cross-fade band at the peek boundary.
+    @Published var peekFade: Double {
+        didSet { defaults.set(peekFade, forKey: "peekFade"); MapWindowController.shared.refreshPeek() }
+    }
+    @Published var invertPan: Bool {
+        didSet { defaults.set(invertPan, forKey: "invertPan") }
+    }
+    // Overall map-window transparency (0 = opaque, applied even when not peeking).
+    @Published var baseTransparency: Double {
+        didSet { defaults.set(baseTransparency, forKey: "baseTransparency"); MapWindowController.shared.applyBaseTransparency() }
+    }
+
+    // Global shortcuts. Modifiers are stored as NSEvent.ModifierFlags raw values.
+    @Published var mapKeyCode: Int {
+        didSet { defaults.set(mapKeyCode, forKey: "mapKeyCode"); GlobalShortcutManager.shared.reload() }
+    }
+    @Published var mapModifiers: UInt {
+        didSet { defaults.set(mapModifiers, forKey: "mapModifiers"); GlobalShortcutManager.shared.reload() }
+    }
+    @Published var mapLabel: String {
+        didSet { defaults.set(mapLabel, forKey: "mapLabel") }
+    }
+    @Published var findKeyCode: Int {
+        didSet { defaults.set(findKeyCode, forKey: "findKeyCode"); GlobalShortcutManager.shared.reload() }
+    }
+    @Published var findModifiers: UInt {
+        didSet { defaults.set(findModifiers, forKey: "findModifiers"); GlobalShortcutManager.shared.reload() }
+    }
+    @Published var findLabel: String {
+        didSet { defaults.set(findLabel, forKey: "findLabel") }
+    }
+
+    private static let defaultModifiers = NSEvent.ModifierFlags([.command, .option]).rawValue
+
+    private init() {
+        alwaysOnTop = defaults.bool(forKey: "alwaysOnTop")
+        peekEnabled = defaults.object(forKey: "peekEnabled") as? Bool ?? true
+        launchAtLogin = (SMAppService.mainApp.status == .enabled)
+        peekRadius = defaults.object(forKey: "peekRadius") as? Double ?? 95
+        peekTransparency = defaults.object(forKey: "peekTransparency") as? Double ?? 0.6
+        peekFade = defaults.object(forKey: "peekFade") as? Double ?? 55
+        invertPan = defaults.bool(forKey: "invertPan")
+        baseTransparency = defaults.object(forKey: "baseTransparency") as? Double ?? 0
+
+        // Defaults: ⌥⌘M (keyCode 46) and ⌥⌘S (keyCode 1).
+        mapKeyCode = defaults.object(forKey: "mapKeyCode") as? Int ?? 46
+        mapModifiers = defaults.object(forKey: "mapModifiers") as? UInt ?? Self.defaultModifiers
+        mapLabel = defaults.string(forKey: "mapLabel") ?? "⌥⌘M"
+        findKeyCode = defaults.object(forKey: "findKeyCode") as? Int ?? 1
+        findModifiers = defaults.object(forKey: "findModifiers") as? UInt ?? Self.defaultModifiers
+        findLabel = defaults.string(forKey: "findLabel") ?? "⌥⌘S"
+    }
+
+    /// Alpha of the map inside the hole (inverse of transparency).
+    var coreAlpha: CGFloat { CGFloat(1 - peekTransparency) }
+    /// Resting alpha of the whole map window.
+    var baseAlpha: CGFloat { CGFloat(1 - baseTransparency) }
+}
+
+/// Checks GitHub for a newer release and can download/install it in place.
+final class UpdateChecker: ObservableObject {
+    static let shared = UpdateChecker()
+
+    @Published var updateAvailable = false
+    @Published var latestVersion = ""
+    @Published var installing = false
+    private var downloadURL: URL?
+
+    private let repo = "cjreplogle/metabolic-map-hotkey"
+
+    var currentVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+    }
+
+    func check() {
+        guard let url = URL(string: "https://api.github.com/repos/\(repo)/releases/latest") else { return }
+        var request = URLRequest(url: url)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
+            guard let self,
+                  let data,
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tag = json["tag_name"] as? String else { return }
+
+            let latest = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+            var zip: URL?
+            if let assets = json["assets"] as? [[String: Any]] {
+                for asset in assets {
+                    if let name = asset["name"] as? String, name.hasSuffix(".zip"),
+                       let urlString = asset["browser_download_url"] as? String {
+                        zip = URL(string: urlString)
+                    }
+                }
+            }
+
+            let newer = Self.isVersion(latest, newerThan: self.currentVersion)
+            DispatchQueue.main.async {
+                self.latestVersion = latest
+                self.downloadURL = zip
+                self.updateAvailable = newer && zip != nil
+            }
+        }.resume()
+    }
+
+    static func isVersion(_ a: String, newerThan b: String) -> Bool {
+        let pa = a.split(separator: ".").map { Int($0) ?? 0 }
+        let pb = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(pa.count, pb.count) {
+            let x = i < pa.count ? pa[i] : 0
+            let y = i < pb.count ? pb[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
+
+    /// Downloads the latest release zip and swaps it in via a detached helper
+    /// script that waits for this app to quit, then relaunches the new build.
+    func performUpdate() {
+        guard let downloadURL else { return }
+        installing = true
+
+        URLSession.shared.downloadTask(with: downloadURL) { [weak self] tmp, _, _ in
+            guard let tmp else {
+                DispatchQueue.main.async { self?.installing = false }
+                return
+            }
+            let fm = FileManager.default
+            let work = fm.temporaryDirectory.appendingPathComponent("mm-update-\(UUID().uuidString)")
+            try? fm.createDirectory(at: work, withIntermediateDirectories: true)
+
+            let zipPath = work.appendingPathComponent("update.zip")
+            try? fm.moveItem(at: tmp, to: zipPath)
+
+            let unzip = Process()
+            unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            unzip.arguments = ["-x", "-k", zipPath.path, work.path]
+            try? unzip.run(); unzip.waitUntilExit()
+
+            let newApp = work.appendingPathComponent("MetabolicMap.app")
+            guard fm.fileExists(atPath: newApp.path) else {
+                DispatchQueue.main.async { self?.installing = false }
+                return
+            }
+
+            let dest = Bundle.main.bundlePath
+            let pid = ProcessInfo.processInfo.processIdentifier
+            let script = work.appendingPathComponent("swap.sh")
+            let contents = """
+            #!/bin/bash
+            while kill -0 \(pid) 2>/dev/null; do sleep 0.2; done
+            /bin/rm -rf "\(dest)"
+            /usr/bin/ditto "\(newApp.path)" "\(dest)"
+            /usr/bin/open "\(dest)"
+            """
+            try? contents.write(to: script, atomically: true, encoding: .utf8)
+
+            let swap = Process()
+            swap.executableURL = URL(fileURLWithPath: "/bin/bash")
+            swap.arguments = [script.path]
+            try? swap.run()
+
+            DispatchQueue.main.async { NSApp.terminate(nil) }
+        }.resume()
+    }
+}
+
+/// Remembers the last non-self app that was frontmost, so focus can be returned.
+final class PreviousAppTracker {
+    static let shared = PreviousAppTracker()
+    private(set) var previousApp: NSRunningApplication?
+
+    func start() {
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier != Bundle.main.bundleIdentifier else { return }
+            self?.previousApp = app
+        }
+    }
+
+    func returnFocus() {
+        previousApp?.activate()
+    }
+}
+
+/// Converts NSEvent modifier flags to the CGEventFlags used by the event tap.
+func cgFlags(from nsRaw: UInt) -> CGEventFlags {
+    let ns = NSEvent.ModifierFlags(rawValue: nsRaw)
+    var cg: CGEventFlags = []
+    if ns.contains(.command) { cg.insert(.maskCommand) }
+    if ns.contains(.option) { cg.insert(.maskAlternate) }
+    if ns.contains(.control) { cg.insert(.maskControl) }
+    if ns.contains(.shift) { cg.insert(.maskShift) }
+    return cg
+}
+
+/// A human-readable label like "⌥⌘M" for a key code + NSEvent modifiers.
+func shortcutLabel(keyCode: Int, modifiers nsRaw: UInt, keyName: String) -> String {
+    let ns = NSEvent.ModifierFlags(rawValue: nsRaw)
+    var s = ""
+    if ns.contains(.control) { s += "⌃" }
+    if ns.contains(.option) { s += "⌥" }
+    if ns.contains(.shift) { s += "⇧" }
+    if ns.contains(.command) { s += "⌘" }
+    return s + keyName
 }
 
 /// Brings a window to the front so it can appear over another app's full-screen
 /// Space, then drops it back to a normal window level so it is not permanently
 /// pinned above every other window.
-func presentWindow(_ window: NSWindow) {
+func presentWindow(_ window: NSWindow, activate: Bool = true, finalAlpha: CGFloat = 1) {
     window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     window.level = .floating
     // Fade in.
     window.alphaValue = 0
-    window.makeKeyAndOrderFront(nil)
-    NSApplication.shared.activate(ignoringOtherApps: true)
+    if activate {
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    } else {
+        // Show on top without stealing focus from the current app.
+        window.orderFrontRegardless()
+    }
     NSAnimationContext.runAnimationGroup { context in
         context.duration = 0.2
         context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-        window.animator().alphaValue = 1
+        window.animator().alphaValue = finalAlpha
     }
 
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
         // Drop back to a normal level unless the user pinned it on top.
-        if !AppSettings.alwaysOnTop {
+        if !AppSettings.shared.alwaysOnTop {
             window.level = .normal
         }
     }
@@ -151,19 +405,31 @@ final class GlobalShortcutManager {
     private var runLoopSource: CFRunLoopSource?
     private var trustTimer: Timer?
 
-    // Virtual Key Codes: M = 46, S = 1
-    private let mKeyCode: Int64 = 46
-    private let sKeyCode: Int64 = 1
+    // Current (user-configurable) shortcuts, read from AppSettings via reload().
+    private var mapKeyCode: Int64 = 46
+    private var mapModifiers: CGEventFlags = [.maskAlternate, .maskCommand]
+    private var findKeyCode: Int64 = 1
+    private var findModifiers: CGEventFlags = [.maskAlternate, .maskCommand]
 
-    // Required modifiers for the global shortcuts: Option + Command.
-    private let requiredModifiers: CGEventFlags = [.maskAlternate, .maskCommand]
-    // Modifiers we care about when deciding whether the chord matches exactly.
+    // Fixed modifiers for the ⌥⌘ + arrow pan shortcuts.
+    private let panModifiers: CGEventFlags = [.maskAlternate, .maskCommand]
+    // Modifiers we care about when deciding whether a chord matches exactly.
     private let trackedModifiers: CGEventFlags =
         [.maskAlternate, .maskCommand, .maskControl, .maskShift]
 
     private init() {}
 
+    /// Loads the current shortcut definitions from AppSettings.
+    func reload() {
+        let s = AppSettings.shared
+        mapKeyCode = Int64(s.mapKeyCode)
+        mapModifiers = cgFlags(from: s.mapModifiers)
+        findKeyCode = Int64(s.findKeyCode)
+        findModifiers = cgFlags(from: s.findModifiers)
+    }
+
     func start() {
+        reload()
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
         let isTrusted = AXIsProcessTrustedWithOptions(options)
 
@@ -219,28 +485,56 @@ final class GlobalShortcutManager {
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
             let mods = event.flags.intersection(manager.trackedModifiers)
 
-            guard mods == manager.requiredModifiers else {
-                return Unmanaged.passUnretained(event)
-            }
-
-            if keyCode == manager.mKeyCode {
+            // User-configurable shortcuts.
+            if keyCode == manager.mapKeyCode, mods == manager.mapModifiers {
                 DispatchQueue.main.async { MapWindowController.shared.toggle() }
                 return nil // consume so the key chord doesn't beep or fall through
             }
 
-            if keyCode == manager.sKeyCode {
+            if keyCode == manager.findKeyCode, mods == manager.findModifiers {
                 DispatchQueue.main.async { MapWindowController.shared.openFind() }
+                return nil
+            }
+
+            // ⌥⌘B returns focus to the app that was active before the map.
+            if mods == manager.panModifiers, keyCode == 11 {
+                DispatchQueue.main.async { PreviousAppTracker.shared.returnFocus() }
                 return nil
             }
 
             // ⌥⌘ + arrows pan the map globally (even when another app is focused).
             // Virtual key codes: left = 123, right = 124, down = 125, up = 126.
-            switch keyCode {
-            case 123: DispatchQueue.main.async { MapWindowController.shared.panFromShortcut(dx: -1, dy: 0) }; return nil
-            case 124: DispatchQueue.main.async { MapWindowController.shared.panFromShortcut(dx: 1, dy: 0) }; return nil
-            case 125: DispatchQueue.main.async { MapWindowController.shared.panFromShortcut(dx: 0, dy: -1) }; return nil
-            case 126: DispatchQueue.main.async { MapWindowController.shared.panFromShortcut(dx: 0, dy: 1) }; return nil
-            default: break
+            if mods == manager.panModifiers {
+                switch keyCode {
+                case 123: DispatchQueue.main.async { MapWindowController.shared.panFromShortcut(dx: -1, dy: 0) }; return nil
+                case 124: DispatchQueue.main.async { MapWindowController.shared.panFromShortcut(dx: 1, dy: 0) }; return nil
+                case 125: DispatchQueue.main.async { MapWindowController.shared.panFromShortcut(dx: 0, dy: -1) }; return nil
+                case 126: DispatchQueue.main.async { MapWindowController.shared.panFromShortcut(dx: 0, dy: 1) }; return nil
+                default: break
+                }
+            }
+
+            // ⌃⌘ +/- grow/shrink the window; ⌃⌘ + arrows snap it across a 3×3 grid.
+            // Key codes: = 24, - 27, keypad + 69, keypad - 78; arrows 123-126.
+            if event.flags.contains(.maskCommand), event.flags.contains(.maskControl) {
+                switch keyCode {
+                case 24, 69: DispatchQueue.main.async { MapWindowController.shared.resizeWindowFromShortcut(1.1) }; return nil
+                case 27, 78: DispatchQueue.main.async { MapWindowController.shared.resizeWindowFromShortcut(0.9) }; return nil
+                case 123: DispatchQueue.main.async { MapWindowController.shared.snapToGrid(dCol: -1, dRow: 0) }; return nil
+                case 124: DispatchQueue.main.async { MapWindowController.shared.snapToGrid(dCol: 1, dRow: 0) }; return nil
+                case 125: DispatchQueue.main.async { MapWindowController.shared.snapToGrid(dCol: 0, dRow: 1) }; return nil
+                case 126: DispatchQueue.main.async { MapWindowController.shared.snapToGrid(dCol: 0, dRow: -1) }; return nil
+                default: break
+                }
+            }
+
+            // ⌥⌘ +/- zoom the map content.
+            if event.flags.contains(.maskCommand), event.flags.contains(.maskAlternate) {
+                switch keyCode {
+                case 24, 69: DispatchQueue.main.async { MapWindowController.shared.zoomFromShortcut(1.25) }; return nil
+                case 27, 78: DispatchQueue.main.async { MapWindowController.shared.zoomFromShortcut(0.8) }; return nil
+                default: break
+                }
             }
 
             return Unmanaged.passUnretained(event)
@@ -293,6 +587,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private var statusItem: NSStatusItem?
+    private var metaboliteIcons: [NSImage] = []
+    private var iconIndex = 0
+    private var iconTimer: Timer?
+
+    private func loadMetaboliteIcons() {
+        // Ordered glycolysis → TCA intermediates (Path00_… Path11_…).
+        let urls = (Bundle.main.urls(forResourcesWithExtension: "svg", subdirectory: nil) ?? [])
+            .filter { $0.lastPathComponent.hasPrefix("Path") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        metaboliteIcons = urls.compactMap { url in
+            guard let image = NSImage(contentsOf: url) else { return nil }
+            image.size = NSSize(width: 18, height: 18)
+            image.isTemplate = true
+            return image
+        }
+    }
+
+    private func startIconCycling() {
+        iconTimer?.invalidate()
+        guard metaboliteIcons.count > 1 else { return }
+        iconTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
+            guard let self, let button = self.statusItem?.button else { return }
+            // Random walk up/down the pathway.
+            let step = Bool.random() ? 1 : -1
+            self.iconIndex = min(max(self.iconIndex + step, 0), self.metaboliteIcons.count - 1)
+            let next = self.metaboliteIcons[self.iconIndex]
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.3
+                button.animator().alphaValue = 0
+            } completionHandler: {
+                button.image = next
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.3
+                    button.animator().alphaValue = 1
+                }
+            }
+        }
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
 
@@ -301,6 +633,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         GlobalShortcutManager.shared.start()
+        PreviousAppTracker.shared.start()
+        UpdateChecker.shared.check()
 
         if MapFileManager.shared.resolveMapURL() == nil {
             showSetup()
@@ -318,13 +652,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         if let button = statusItem?.button {
-            let image = NSImage(
-                systemSymbolName: "map",
-                accessibilityDescription: "Metabolic Map"
-            )
-            image?.isTemplate = true
-            button.image = image
+            loadMetaboliteIcons()
+            button.image = metaboliteIcons.first
+                ?? NSImage(systemSymbolName: "map", accessibilityDescription: "Metabolic Map")
+            button.image?.isTemplate = true
             button.toolTip = "Metabolic Map"
+            startIconCycling()
         }
 
         let menu = NSMenu()
@@ -334,28 +667,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
 
-        addItem("Change Map PDF…", action: #selector(changeMap), to: menu)
-        addItem("Stanford Pathways Map (Download)…", action: #selector(openPathwaysMap), to: menu)
-
-        menu.addItem(.separator())
-
-        let alwaysOnTop = NSMenuItem(
-            title: "Always on Top",
-            action: #selector(toggleAlwaysOnTop(_:)),
-            keyEquivalent: ""
-        )
-        alwaysOnTop.target = self
-        alwaysOnTop.state = AppSettings.alwaysOnTop ? .on : .off
-        menu.addItem(alwaysOnTop)
-
-        let peek = NSMenuItem(
-            title: "Peek-Through",
-            action: #selector(togglePeek(_:)),
-            keyEquivalent: ""
-        )
-        peek.target = self
-        peek.state = AppSettings.peekEnabled ? .on : .off
-        menu.addItem(peek)
+        addItem("Options…", action: #selector(openOptions), to: menu)
 
         menu.addItem(.separator())
 
@@ -392,34 +704,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MapWindowController.shared.openFind()
     }
 
-    @objc private func changeMap() {
-        MapFileManager.shared.chooseMap { success in
-            if success {
-                DispatchQueue.main.async {
-                    MapWindowController.shared.close()
-                }
-            }
-        }
-    }
-
-    @objc private func openPathwaysMap() {
-        // Opens the Stanford metabolic pathways map in the default browser so the
-        // PDF can be downloaded. Update this URL if the canonical location moves.
-        if let url = URL(string: "https://metabolicpathways.stanford.edu") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    @objc private func toggleAlwaysOnTop(_ sender: NSMenuItem) {
-        AppSettings.alwaysOnTop.toggle()
-        sender.state = AppSettings.alwaysOnTop ? .on : .off
-        MapWindowController.shared.setAlwaysOnTop(AppSettings.alwaysOnTop)
-    }
-
-    @objc private func togglePeek(_ sender: NSMenuItem) {
-        AppSettings.peekEnabled.toggle()
-        sender.state = AppSettings.peekEnabled ? .on : .off
-        MapWindowController.shared.refreshPeek()
+    @objc private func openOptions() {
+        OptionsWindowController.shared.show()
     }
 
     @objc private func quit() {
@@ -542,11 +828,98 @@ struct SetupView: View {
 
 // MARK: - Map viewer
 
+/// A clip view that keeps the document centered when it's smaller than the
+/// viewport (instead of pinning it to a corner) and blocks over-scroll.
+final class CenteringClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        guard let doc = documentView else { return super.constrainBoundsRect(proposedBounds) }
+        var rect = proposedBounds
+        let frame = doc.frame
+
+        // Center if the viewport is larger than the document on an axis; otherwise
+        // hard-clamp the origin so there's no rubber-band over-scroll.
+        if rect.width >= frame.width {
+            rect.origin.x = frame.minX + (frame.width - rect.width) / 2
+        } else {
+            rect.origin.x = min(max(rect.origin.x, frame.minX), frame.maxX - rect.width)
+        }
+        if rect.height >= frame.height {
+            rect.origin.y = frame.minY + (frame.height - rect.height) / 2
+        } else {
+            rect.origin.y = min(max(rect.origin.y, frame.minY), frame.maxY - rect.height)
+        }
+        return rect
+    }
+}
+
+/// A PDFView where click-drag pans the document (grab/hand tool) instead of
+/// selecting text.
+final class PanningPDFView: PDFView {
+
+    private var scroll: NSScrollView? { subviews.compactMap { $0 as? NSScrollView }.first }
+
+    override func mouseDown(with event: NSEvent) {
+        // ⌘-drag moves the window (there's no title bar to grab); plain drag pans.
+        if event.modifierFlags.contains(.command) {
+            window?.performDrag(with: event)
+            return
+        }
+        NSCursor.closedHand.set()
+        // Intentionally not calling super -> no text selection.
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let clip = scroll?.contentView else { return }
+        // Convert screen-point deltas to the clip's (possibly magnified) document
+        // coordinates so the page tracks the cursor 1:1 at any zoom.
+        let fx = clip.bounds.width / max(1, clip.frame.width)
+        let fy = clip.bounds.height / max(1, clip.frame.height)
+        let sign: CGFloat = AppSettings.shared.invertPan ? 1 : -1
+        var origin = clip.bounds.origin
+        origin.x += event.deltaX * fx * sign
+        origin.y -= event.deltaY * fy * sign
+
+        if let doc = scroll?.documentView {
+            origin.x = min(max(0, origin.x), max(0, doc.frame.width - clip.bounds.width))
+            origin.y = min(max(0, origin.y), max(0, doc.frame.height - clip.bounds.height))
+        }
+        clip.setBoundsOrigin(origin)
+        scroll?.reflectScrolledClipView(clip)
+        scroll?.documentView?.needsDisplay = true   // re-render newly exposed area
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        NSCursor.arrow.set()
+    }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    // Handle trackpad/wheel scrolling ourselves and hard-clamp to the page so
+    // there is no elastic over-scroll past the edges.
+    override func scrollWheel(with event: NSEvent) {
+        guard let scrollView = scroll else { super.scrollWheel(with: event); return }
+        let clip = scrollView.contentView
+        var origin = clip.bounds.origin
+        origin.x -= event.scrollingDeltaX
+        origin.y -= event.scrollingDeltaY
+
+        if let doc = scrollView.documentView {
+            origin.x = min(max(0, origin.x), max(0, doc.frame.width - clip.bounds.width))
+            origin.y = min(max(0, origin.y), max(0, doc.frame.height - clip.bounds.height))
+        }
+        clip.setBoundsOrigin(origin)
+        scrollView.reflectScrolledClipView(clip)
+        scrollView.documentView?.needsDisplay = true   // re-render newly exposed area
+    }
+}
+
 /// Hosts the PDFView plus an in-window ⌘F find bar (search field, prev/next,
 /// and a live "n of m" match count).
 final class MapContainerView: NSView {
 
-    let pdfView = PDFView()
+    let pdfView = PanningPDFView()
 
     // A low-resolution full-page render kept behind the PDFView. When the PDFView
     // hasn't drawn fresh tiles yet (e.g. right after a jump), the transparent
@@ -559,11 +932,17 @@ final class MapContainerView: NSView {
     private let searchField = NSSearchField()
     private let countLabel = NSTextField(labelWithString: "")
 
+    private let zoomControls = NSStackView()
+    private var zoomControlsVisible = false
+
     private var matches: [PDFSelection] = []
     private var currentMatch = -1
     private var searchDebounce: Timer?
     private var searchGeneration = 0
     private var zoomTimer: Timer?
+    private var zoomTargetScale: CGFloat = 1
+    private var didRestore = false
+    private var saveTimer: Timer?
     // Set once the user manually zooms/pans, so the auto fill-zoom on layout does
     // not fight/override their navigation. Cleared by resetZoom().
     private var userControlledView = false
@@ -571,9 +950,15 @@ final class MapContainerView: NSView {
     // "Peek hole": makes a circular region under the cursor transparent so you
     // can see whatever is behind the map window.
     private var mouseMonitors: [Any] = []
+    private var focusObservers: [NSObjectProtocol] = []
+    // Peek is suppressed while the window is focused (clicked into); it fades out
+    // on focus and resumes when the window loses focus.
+    private var peekSuppressed = false
+    private var peekStrength: CGFloat = 1     // 1 = full hole, 0 = no hole
+    private var peekFadeTimer: Timer?
     private var peekCenter: NSPoint?
-    private let peekRadius: CGFloat = 95   // fully-transparent core
-    private let peekFade: CGFloat = 55     // soft fade band beyond the core
+    private var peekRadius: CGFloat { CGFloat(AppSettings.shared.peekRadius) }
+    private var peekFade: CGFloat { CGFloat(AppSettings.shared.peekFade) }  // soft fade band beyond the core
     private let peekMaskLayer = CALayer()
 
     override init(frame frameRect: NSRect) {
@@ -639,6 +1024,7 @@ final class MapContainerView: NSView {
         searchField.sendsWholeSearchString = false
         searchField.delegate = self
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         countLabel.textColor = .secondaryLabelColor
         countLabel.font = .systemFont(ofSize: 11)
@@ -667,8 +1053,57 @@ final class MapContainerView: NSView {
             stack.trailingAnchor.constraint(equalTo: findBar.trailingAnchor),
             stack.topAnchor.constraint(equalTo: findBar.topAnchor),
             stack.bottomAnchor.constraint(equalTo: findBar.bottomAnchor),
-            searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 240)
+            searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 110)
         ])
+
+        // Hover-activated zoom controls in the bottom-right.
+        let zoomIn = makeButton("plus", label: "Zoom in", action: #selector(zoomInButton))
+        let zoomOut = makeButton("minus", label: "Zoom out", action: #selector(zoomOutButton))
+        for button in [zoomIn, zoomOut] {
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        }
+        zoomControls.orientation = .vertical
+        zoomControls.spacing = 6
+        zoomControls.edgeInsets = NSEdgeInsets(top: 5, left: 5, bottom: 5, right: 5)
+        zoomControls.addArrangedSubview(zoomIn)
+        zoomControls.addArrangedSubview(zoomOut)
+        zoomControls.wantsLayer = true
+        zoomControls.layer?.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.75).cgColor
+        zoomControls.layer?.cornerRadius = 8
+        zoomControls.translatesAutoresizingMaskIntoConstraints = false
+        zoomControls.alphaValue = 0
+        zoomControls.isHidden = true
+        // Keep the zoom controls beneath the find bar so the find bar covers them
+        // when they overlap at the bottom.
+        addSubview(zoomControls, positioned: .below, relativeTo: findBar)
+        NSLayoutConstraint.activate([
+            zoomControls.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            zoomControls.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -14)
+        ])
+    }
+
+    @objc private func zoomInButton() { smoothZoom(by: 1.25) }
+    @objc private func zoomOutButton() { smoothZoom(by: 0.8) }
+
+    /// Fades the bottom-right zoom controls in when the cursor is near the corner.
+    private func updateZoomControls(near viewPoint: NSPoint?) {
+        let show: Bool
+        if let p = viewPoint {
+            let corner = NSPoint(x: bounds.maxX, y: bounds.minY)
+            show = hypot(p.x - corner.x, p.y - corner.y) < 170
+        } else {
+            show = false
+        }
+        guard show != zoomControlsVisible else { return }
+        zoomControlsVisible = show
+        if show { zoomControls.isHidden = false }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.15
+            zoomControls.animator().alphaValue = show ? 1 : 0
+        }, completionHandler: { [weak self] in
+            if !show { self?.zoomControls.isHidden = true }
+        })
     }
 
     private func makeButton(_ symbol: String, label: String, action: Selector) -> NSButton {
@@ -701,38 +1136,68 @@ final class MapContainerView: NSView {
             }
         }
 
-        // Cmd + Shift + arrows : move the window itself around the screen.
-        // (Virtual key codes: left = 123, right = 124, down = 125, up = 126.)
-        if flags.contains(.command), flags.contains(.shift) {
-            switch event.keyCode {
-            case 123: moveWindow(dx: -1, dy: 0); return true
-            case 124: moveWindow(dx: 1, dy: 0); return true
-            case 125: moveWindow(dx: 0, dy: -1); return true
-            case 126: moveWindow(dx: 0, dy: 1); return true
-            default: break
-            }
-        }
-
-        // Cmd + arrows : smooth pan in a direction (Virtual key codes:
-        // left = 123, right = 124, down = 125, up = 126).
-        if flags.contains(.command) {
-            switch event.keyCode {
-            case 123: pan(dx: -1, dy: 0); return true
-            case 124: pan(dx: 1, dy: 0); return true
-            case 125: pan(dx: 0, dy: -1); return true
-            case 126: pan(dx: 0, dy: 1); return true
-            default: break
-            }
-        }
-
+        // Arrow panning/moving is handled globally by the event tap (⌥⌘ pan,
+        // ⌃⌘ grid/resize). We intentionally do NOT handle bare ⌘/⌘⇧ + arrows here,
+        // so a stray ⌘+arrow (e.g. Ctrl lagging while pressing ⌃⌘+arrow) can't
+        // accidentally pan the map.
         return super.performKeyEquivalent(with: event)
     }
 
     override func layout() {
         super.layout()
-        applyFillZoom()
+        if let sv = pdfScrollView {
+            sv.verticalScrollElasticity = .none
+            sv.horizontalScrollElasticity = .none
+            sv.usesPredominantAxisScrolling = false
+        }
+        applyOrRestoreZoom()
         updateUnderlayFrame()
         updatePeekMask()
+    }
+
+    private func applyOrRestoreZoom() {
+        guard !isAdjustingZoom else { return }
+        // On first valid layout, restore the last saved zoom/scroll if we have one.
+        if !didRestore,
+           UserDefaults.standard.bool(forKey: "hasSavedView"),
+           let page = pdfView.document?.page(at: 0),
+           bounds.width > 1, bounds.height > 1 {
+            restoreSavedView(page: page)
+            didRestore = true
+            userControlledView = true
+            return
+        }
+        applyFillZoom()
+    }
+
+    private func restoreSavedView(page: PDFPage) {
+        let d = UserDefaults.standard
+        let scale = CGFloat(d.double(forKey: "savedScale"))
+        let cx = CGFloat(d.double(forKey: "savedCenterX"))
+        let cy = CGFloat(d.double(forKey: "savedCenterY"))
+        isAdjustingZoom = true
+        pdfView.autoScales = false
+        pdfView.scaleFactor = max(0.02, min(8, scale))
+        center(on: NSPoint(x: cx, y: cy), page: page)
+        isAdjustingZoom = false
+    }
+
+    /// Persists the current zoom + view-center (debounced) so it's restored later.
+    private func scheduleSaveViewState() {
+        saveTimer?.invalidate()
+        saveTimer = Timer.scheduledTimer(withTimeInterval: 0.4, repeats: false) { [weak self] _ in
+            self?.saveViewState()
+        }
+    }
+
+    func saveViewState() {
+        guard let page = pdfView.document?.page(at: 0), bounds.width > 1 else { return }
+        let c = currentCenter(on: page)
+        let d = UserDefaults.standard
+        d.set(Double(pdfView.scaleFactor), forKey: "savedScale")
+        d.set(Double(c.x), forKey: "savedCenterX")
+        d.set(Double(c.y), forKey: "savedCenterY")
+        d.set(true, forKey: "hasSavedView")
     }
 
     /// Tracks the cursor globally so the peek hole appears when the pointer is
@@ -748,15 +1213,64 @@ final class MapContainerView: NSView {
         }) {
             mouseMonitors.append(local)
         }
+
+        let center = NotificationCenter.default
+        focusObservers.append(center.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, note.object as? NSWindow === self.window else { return }
+            self.suppressPeekWithFade()
+        })
+        focusObservers.append(center.addObserver(
+            forName: NSWindow.didResignKeyNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let self, note.object as? NSWindow === self.window else { return }
+            self.resumePeek()
+        })
+    }
+
+    private func suppressPeekWithFade() {
+        peekSuppressed = true
+        peekFadeTimer?.invalidate()
+        let startStrength = peekStrength
+        let startTime = Date()
+        let duration = 0.25
+        peekFadeTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let progress = min(Date().timeIntervalSince(startTime) / duration, 1.0)
+            self.peekStrength = startStrength * (1 - CGFloat(progress))
+            self.updatePeekMask()
+            if progress >= 1.0 {
+                self.peekStrength = 0
+                self.layer?.mask = nil
+                timer.invalidate()
+                self.peekFadeTimer = nil
+            }
+        }
+    }
+
+    private func resumePeek() {
+        peekFadeTimer?.invalidate()
+        peekFadeTimer = nil
+        peekSuppressed = false
+        peekStrength = 1
+        handleMouseMoved()   // recompute from the current cursor position, not stale
     }
 
     private func handleMouseMoved() {
-        guard AppSettings.peekEnabled, let window else {
+        guard let window else {
+            updateZoomControls(near: nil)
+            return
+        }
+        let viewPoint = convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+        updateZoomControls(near: bounds.contains(viewPoint) ? viewPoint : nil)
+
+        guard !peekSuppressed else { return }   // peek disabled while window is focused
+        guard AppSettings.shared.peekEnabled else {
             peekCenter = nil
             updatePeekMask()
             return
         }
-        let viewPoint = convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
         // Active when within the window, or within the peek's reach of its edge.
         let reach = peekRadius + peekFade
         if bounds.insetBy(dx: -reach, dy: -reach).contains(viewPoint) {
@@ -773,57 +1287,83 @@ final class MapContainerView: NSView {
     /// fades to opaque, so the edge is feathered.
     /// Called when the peek-through setting is toggled from the menu.
     func peekSettingChanged() {
-        if !AppSettings.peekEnabled { peekCenter = nil }
+        if !AppSettings.shared.peekEnabled { peekCenter = nil }
         updatePeekMask()
     }
 
     private func updatePeekMask() {
-        guard AppSettings.peekEnabled,
+        guard AppSettings.shared.peekEnabled, peekStrength > 0.001,
               let center = peekCenter, bounds.width > 1, bounds.height > 1 else {
             layer?.mask = nil
             return
         }
 
-        let scale: CGFloat = 0.3
-        let width = max(1, Int(bounds.width * scale))
-        let height = max(1, Int(bounds.height * scale))
+        let scale: CGFloat = 0.4
+        let w = max(1, Int(bounds.width * scale))
+        let h = max(1, Int(bounds.height * scale))
 
-        guard let ctx = CGContext(
-            data: nil,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return }
+        let radius = Float(peekRadius)
+        let fade = Float(peekFade)
+        let coreAlpha = Float(AppSettings.shared.coreAlpha)
+        let strength = Float(peekStrength)
+        let cx = Float(center.x)
+        let cy = Float(center.y)
+        let boundsW = Float(bounds.width)
+        let boundsH = Float(bounds.height)
+        let invScale = Float(1 / scale)
 
-        let outerRadius = (peekRadius + peekFade) * scale
-        let coreFraction = peekRadius / (peekRadius + peekFade)
-        // Low (not zero) core alpha so the map stays faintly visible in the hole
-        // while what's behind remains readable.
-        let coreAlpha: CGFloat = 0.4
-        let colors = [
-            CGColor(red: 1, green: 1, blue: 1, alpha: coreAlpha),   // faint map in core
-            CGColor(red: 1, green: 1, blue: 1, alpha: coreAlpha),
-            CGColor(red: 1, green: 1, blue: 1, alpha: 1)            // fully opaque map
-        ] as CFArray
-        guard let gradient = CGGradient(
-            colorsSpace: CGColorSpaceCreateDeviceRGB(),
-            colors: colors,
-            locations: [0, coreFraction, 1]
-        ) else { return }
+        // How much each side "flattens" toward its edge, ramped continuously with
+        // how far the hole penetrates past that edge (0 = untouched circle, 1 =
+        // fully flat to the edge). This avoids a snap when the cursor crosses the
+        // radius threshold, and removes thin slivers near corners.
+        func flatten(_ gap: Float) -> Float { 1 - max(0, min(1, (radius - gap) / radius)) }
+        let mLeft = flatten(cx)
+        let mRight = flatten(boundsW - cx)
+        let mBottom = flatten(cy)
+        let mTop = flatten(boundsH - cy)
 
-        let c = CGPoint(x: center.x * scale, y: center.y * scale)
-        ctx.setBlendMode(.copy)
-        ctx.drawRadialGradient(
-            gradient,
-            startCenter: c, startRadius: 0,
-            endCenter: c, endRadius: outerRadius,
-            options: [.drawsAfterEndLocation]
-        )
+        var buffer = [UInt8](repeating: 0, count: w * h * 4)
+        buffer.withUnsafeMutableBufferPointer { buf in
+            for row in 0..<h {
+                let viewY = Float(h - row) * invScale   // row 0 = top of image = top of view
+                for col in 0..<w {
+                    let viewX = Float(col) * invScale
 
-        guard let image = ctx.makeImage() else { return }
+                    var dx = viewX - cx
+                    dx *= (viewX < cx) ? mLeft : mRight
+                    var dy = viewY - cy
+                    dy *= (viewY < cy) ? mBottom : mTop
+
+                    let d = (dx * dx + dy * dy).squareRoot()
+                    let alpha: Float
+                    if d <= radius {
+                        alpha = coreAlpha
+                    } else if d >= radius + fade {
+                        alpha = 1
+                    } else {
+                        let u = (d - radius) / fade
+                        let s = u * u * u * (u * (u * 6 - 15) + 10)  // smootherstep
+                        alpha = coreAlpha + (1 - coreAlpha) * s
+                    }
+
+                    // Fade the whole hole out toward opaque when suppressed.
+                    let finalAlpha = 1 - strength * (1 - alpha)
+                    let v = UInt8(max(0, min(255, finalAlpha * 255)))
+                    let idx = (row * w + col) * 4
+                    buf[idx] = v; buf[idx + 1] = v; buf[idx + 2] = v; buf[idx + 3] = v
+                }
+            }
+        }
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: Data(buffer) as CFData),
+              let image = CGImage(
+                width: w, height: h,
+                bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent
+              ) else { return }
 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -841,10 +1381,23 @@ final class MapContainerView: NSView {
         startPeekTracking()
 
         if let scrollView = pdfScrollView {
-            scrollView.contentView.postsBoundsChangedNotifications = true
+            // Allow free diagonal trackpad scrolling (no axis lock) and stop the
+            // rubber-band over-scroll that exposed a gray bar past the top.
+            scrollView.usesPredominantAxisScrolling = false
+            scrollView.verticalScrollElasticity = .none
+            scrollView.horizontalScrollElasticity = .none
+
+            // Swap in a centering clip view so a zoomed-out page stays centered.
+            let doc = scrollView.documentView
+            let clip = CenteringClipView()
+            clip.drawsBackground = false
+            scrollView.contentView = clip
+            scrollView.documentView = doc
+
+            clip.postsBoundsChangedNotifications = true
             scrollObserver = NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification,
-                object: scrollView.contentView,
+                object: clip,
                 queue: .main
             ) { [weak self] _ in
                 self?.updateUnderlayFrame()
@@ -900,6 +1453,7 @@ final class MapContainerView: NSView {
         guard underlay.image != nil, let page = pdfView.document?.page(at: 0) else { return }
         let pageRectInPDFView = pdfView.convert(page.bounds(for: .cropBox), from: page)
         underlay.frame = convert(pageRectInPDFView, from: pdfView)
+        scheduleSaveViewState()   // remember the current zoom/scroll (debounced)
     }
 
     /// Scales the page slightly past "fit" so the surrounding gray margins are
@@ -988,8 +1542,6 @@ final class MapContainerView: NSView {
                 guard let self, generation == self.searchGeneration else { return }
                 self.matches = found
                 self.pdfView.highlightedSelections = found.isEmpty ? nil : found
-                // New query: return to the full-page view; Enter/next will zoom.
-                self.resetZoom()
 
                 if found.isEmpty {
                     self.currentMatch = -1
@@ -1002,16 +1554,26 @@ final class MapContainerView: NSView {
         }
     }
 
+    /// Reveals the current match. Live typing (`zoom: false`) centers on it at the
+    /// current zoom (never zooms out); stepping through results (`zoom: true`)
+    /// zooms in on the match.
     private func focusCurrentMatch(zoom: Bool) {
         guard matches.indices.contains(currentMatch) else { return }
         let selection = matches[currentMatch]
         pdfView.setCurrentSelection(selection, animate: true)
         countLabel.stringValue = "\(currentMatch + 1) of \(matches.count)"
 
-        if zoom, let page = selection.pages.first {
+        guard let page = selection.pages.first else { return }
+        let b = selection.bounds(for: page)
+        if zoom {
             zoomToMatch(selection, on: page)
         } else {
-            pdfView.go(to: selection)
+            animateView(
+                toScale: pdfView.scaleFactor,
+                toCenter: NSPoint(x: b.midX, y: b.midY),
+                on: page,
+                duration: 0.25
+            )
         }
     }
 
@@ -1030,16 +1592,12 @@ final class MapContainerView: NSView {
     /// Smoothly zooms in and centers on the given match so the highlighted text
     /// is comfortably readable.
     private func zoomToMatch(_ selection: PDFSelection, on page: PDFPage) {
-
         let bounds = selection.bounds(for: page)
         guard bounds.width > 0, bounds.height > 0 else {
             pdfView.go(to: selection)
             return
         }
-
         let viewSize = visibleSize
-        // Aim for the match to occupy a comfortable slice of the view, then clamp
-        // to a sane zoom range so we never over- or under-shoot.
         // Smaller fractions -> more surrounding context (less tight zoom).
         let widthScale = (viewSize.width * 0.14) / bounds.width
         let heightScale = (viewSize.height * 0.07) / bounds.height
@@ -1054,16 +1612,39 @@ final class MapContainerView: NSView {
         )
     }
 
-    /// Smoothly zooms in/out by `factor`, keeping the current view center fixed.
+    /// Smoothly zooms in/out by `factor`. PDFView keeps the view center fixed when
+    /// scaleFactor changes, so we only animate the scale (re-centering here caused
+    /// the view to drift on each zoom). Repeated calls (key repeat) extend the same
+    /// animation's target instead of starting a new one, avoiding render churn.
     private func smoothZoom(by factor: CGFloat) {
-        guard let page = pdfView.currentPage else { return }
-        let target = min(max(pdfView.scaleFactor * factor, 0.25), 8.0)
-        animateView(
-            toScale: target,
-            toCenter: currentCenter(on: page),
-            on: page,
-            duration: 0.18
-        )
+        let base = (zoomTimer != nil) ? zoomTargetScale : pdfView.scaleFactor
+        zoomTargetScale = min(max(base * factor, 0.05), 8.0)
+        userControlledView = true
+
+        if zoomTimer != nil { return }  // already animating toward the target
+
+        zoomTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+
+            let current = self.pdfView.scaleFactor
+            let target = self.zoomTargetScale
+            // Ease toward the (possibly moving) target; stop when close enough.
+            let next = current + (target - current) * 0.25
+
+            self.isAdjustingZoom = true
+            self.pdfView.scaleFactor = next
+            self.isAdjustingZoom = false
+            self.updateUnderlayFrame()
+
+            if abs(target - next) < 0.002 {
+                self.isAdjustingZoom = true
+                self.pdfView.scaleFactor = target
+                self.isAdjustingZoom = false
+                self.updateUnderlayFrame()
+                timer.invalidate()
+                self.zoomTimer = nil
+            }
+        }
     }
 
     /// Smoothly slides the view by a fraction of the visible area in a direction,
@@ -1074,16 +1655,21 @@ final class MapContainerView: NSView {
         pan(dx: dx, dy: dy)
     }
 
+    /// Public entry point for the global ⌥⌘ +/- zoom shortcut.
+    func zoomBy(_ factor: CGFloat) {
+        smoothZoom(by: factor)
+    }
+
     private func pan(dx: CGFloat, dy: CGFloat) {
         guard let scrollView = pdfScrollView else { return }
         let clip = scrollView.contentView
         let visible = clip.bounds
         let step: CGFloat = 0.3
 
+        // Arrow-key panning is a fixed direction (not affected by Invert Pan).
         var origin = visible.origin
         origin.x += dx * visible.width * step
-        // Document view is flipped (top-left origin): scrolling "up" decreases y.
-        origin.y -= dy * visible.height * step
+        origin.y += dy * visible.height * step
 
         let docSize = scrollView.documentView?.frame.size ?? visible.size
         origin.x = min(max(0, origin.x), max(0, docSize.width - visible.width))
@@ -1178,6 +1764,9 @@ final class MapContainerView: NSView {
         for monitor in mouseMonitors {
             NSEvent.removeMonitor(monitor)
         }
+        for observer in focusObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     private func easeInOut(_ t: CGFloat) -> CGFloat {
@@ -1228,10 +1817,15 @@ final class MapWindowController: NSObject {
     private var pdfView: PDFView?
     private var container: MapContainerView?
 
+    // 3×3 grid position: column 0=left,1=center,2=right; row 0=top,1=middle,2=bottom.
+    // Default matches the top-right launch position.
+    private var gridCol = 2
+    private var gridRow = 0
+
     /// Ensures the map window exists and is frontmost. Returns the live PDFView,
     /// or nil if the PDF could not be opened.
     @discardableResult
-    func show() -> PDFView? {
+    func show(activate: Bool = true) -> PDFView? {
 
         guard let url = MapFileManager.shared.resolveMapURL() else {
 
@@ -1243,7 +1837,7 @@ final class MapWindowController: NSObject {
         }
 
         if let existing = window {
-            presentWindow(existing)
+            presentWindow(existing, activate: activate, finalAlpha: AppSettings.shared.baseAlpha)
             return pdfView
         }
 
@@ -1262,7 +1856,7 @@ final class MapWindowController: NSObject {
         let pdfView = container.pdfView
 
         pdfView.document = document
-        pdfView.autoScales = true
+        pdfView.autoScales = false   // we manage scale via applyFillZoom (cover fit)
         pdfView.displayMode = .singlePage
         pdfView.displayDirection = .horizontal
         // Transparent so unrendered tiles reveal the low-res underlay instead of
@@ -1331,8 +1925,13 @@ final class MapWindowController: NSObject {
         self.pdfView = pdfView
         self.container = container
 
-        presentWindow(window)
+        presentWindow(window, activate: activate, finalAlpha: AppSettings.shared.baseAlpha)
         return pdfView
+    }
+
+    func applyBaseTransparency() {
+        guard let window, window.isVisible else { return }
+        window.animator().alphaValue = AppSettings.shared.baseAlpha
     }
 
     /// Shows the map (if needed) and opens the in-map find bar. Used by ⌥⌘S.
@@ -1397,13 +1996,14 @@ final class MapWindowController: NSObject {
         }
     }
 
-    /// Same ⌥⌘M shortcut: hide only when the map is already the frontmost window;
-    /// otherwise show it / bring it to the front (even if hidden or behind others).
+    /// Same ⌥⌘M shortcut: hide the map if it's showing, otherwise show it on top
+    /// WITHOUT stealing focus from the current app.
     func toggle() {
-        if let window, window.isVisible, window.isKeyWindow {
+        if let window, window.isVisible {
+            container?.saveViewState()
             fadeOutWindow(window)
         } else {
-            show()
+            show(activate: false)
         }
     }
 
@@ -1427,6 +2027,76 @@ final class MapWindowController: NSObject {
         container?.panBy(dx: dx, dy: dy)
     }
 
+    /// Zooms the map from the global ⌥⌘ +/- shortcut (no-op if map isn't open).
+    func zoomFromShortcut(_ factor: CGFloat) {
+        container?.zoomBy(factor)
+    }
+
+    /// Grows/shrinks the window from the global ⌃⌘ +/- shortcut, anchored to the
+    /// top-right corner and clamped to the screen (never expands past the edge).
+    func resizeWindowFromShortcut(_ factor: CGFloat) {
+        guard let window, let screen = window.screen ?? NSScreen.main else { return }
+        let f = window.frame
+        let vf = screen.visibleFrame
+
+        // The real Auto Layout minimum (driven by the find bar's width). Using
+        // this as the floor means the window never snaps its width back afterward.
+        let fitting = window.contentView?.fittingSize ?? NSSize(width: 240, height: 140)
+        let minW = max(fitting.width, 200)
+        let minH = max(fitting.height, 140)
+
+        // Fixed top-right corner (clamped to the screen).
+        let right = min(f.maxX, vf.maxX)
+        let top = min(f.maxY, vf.maxY)
+
+        // Uniform scale (preserve aspect) so the window never narrows on one axis
+        // after the other hits its limit. Clamp the factor to the min size and the
+        // available screen space, then stop if it can't change.
+        var k = factor
+        if factor < 1 {
+            k = max(k, minW / f.width, minH / f.height)
+        } else {
+            k = min(k, (right - vf.minX) / f.width, (top - vf.minY) / f.height)
+        }
+        guard abs(k - 1) > 0.001 else { return }
+
+        let newW = f.width * k
+        let newH = f.height * k
+        window.setFrame(NSRect(x: right - newW, y: top - newH, width: newW, height: newH), display: true)
+    }
+
+    /// Snaps the window to a cell of a 3×3 grid of screen positions (⌃⌘ + arrows).
+    func snapToGrid(dCol: Int, dRow: Int) {
+        guard let window, let screen = window.screen ?? NSScreen.main else { return }
+        gridCol = min(2, max(0, gridCol + dCol))
+        gridRow = min(2, max(0, gridRow + dRow))
+
+        let vf = screen.visibleFrame
+        let w = window.frame.width
+        let h = window.frame.height
+        let xs = [vf.minX, vf.midX - w / 2, vf.maxX - w]
+        let ys = [vf.maxY - h, vf.midY - h / 2, vf.minY]   // row 0 = top
+
+        let origin = NSPoint(x: xs[gridCol], y: ys[gridRow])
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.14
+            window.animator().setFrame(NSRect(origin: origin, size: window.frame.size), display: true)
+        }
+    }
+
+    /// Moves the window from the global ⌥⌘⇧ + arrow shortcut. +y is up.
+    func moveWindowFromShortcut(dx: CGFloat, dy: CGFloat) {
+        guard let window else { return }
+        let step: CGFloat = 90
+        var origin = window.frame.origin
+        origin.x += dx * step
+        origin.y += dy * step
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.12
+            window.animator().setFrameOrigin(origin)
+        }
+    }
+
     private func showFileError() {
 
         let alert = NSAlert()
@@ -1448,9 +2118,341 @@ final class MapWindowController: NSObject {
 extension MapWindowController: NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
+        container?.saveViewState()
         window = nil
         pdfView = nil
         container = nil
     }
 }
 
+
+// MARK: - Options
+
+final class OptionsWindowController: NSObject {
+
+    static let shared = OptionsWindowController()
+    private var window: NSWindow?
+
+    func show() {
+        if let window {
+            presentWindow(window)
+            return
+        }
+
+        let hosting = NSHostingView(rootView: OptionsView())
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 220),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Metabolic Map Options"
+        window.contentView = hosting
+        window.setContentSize(hosting.fittingSize)
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.delegate = self
+        self.window = window
+        presentWindow(window)
+    }
+}
+
+extension OptionsWindowController: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        window = nil
+    }
+}
+
+struct OptionsView: View {
+
+    @ObservedObject private var updater = UpdateChecker.shared
+    @State private var tab = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+
+            Picker("", selection: $tab) {
+                Text("General").tag(0)
+                Text("Shortcuts").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(width: 190)
+            .padding(.top, 8)
+            .padding(.bottom, 6)
+
+            Group {
+                if tab == 0 {
+                    GeneralOptionsView()
+                } else {
+                    ShortcutOptionsView()
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 300, alignment: .top)
+            .font(.system(size: 11))
+            .controlSize(.small)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 14)
+
+            Divider()
+                .padding(.horizontal, 12)
+
+            HStack {
+                if updater.installing {
+                    Text("Updating…")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                } else if updater.updateAvailable {
+                    Button("Update to v\(updater.latestVersion)") {
+                        updater.performUpdate()
+                    }
+                    .controlSize(.small)
+                }
+
+                Spacer()
+
+                Link("v\(updater.currentVersion)",
+                     destination: URL(string: "https://github.com/cjreplogle/metabolic-map-hotkey")!)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .padding(.trailing, 4)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .frame(width: 320)
+    }
+}
+
+struct GeneralOptionsView: View {
+
+    @ObservedObject private var settings = AppSettings.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+
+            Toggle("Launch at Login", isOn: $settings.launchAtLogin)
+            Toggle("Always on Top", isOn: $settings.alwaysOnTop)
+            Toggle("Peek-Through", isOn: $settings.peekEnabled)
+            Toggle("Invert Pan", isOn: $settings.invertPan)
+
+            Divider()
+
+            Text("PEEK-THROUGH")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Radius")
+                    Spacer()
+                    Text("\(Int(settings.peekRadius)) pt")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(value: $settings.peekRadius, in: 30...260)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Peek-Through Transparency")
+                    Spacer()
+                    Text("\(Int(settings.peekTransparency * 100))%")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(value: $settings.peekTransparency, in: 0...1)
+            }
+            .disabled(!settings.peekEnabled)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Base Transparency")
+                    Spacer()
+                    Text("\(Int(settings.baseTransparency * 100))%")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(value: $settings.baseTransparency, in: 0...0.9)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Edge Fade")
+                    Spacer()
+                    Text("\(Int(settings.peekFade)) pt")
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(value: $settings.peekFade, in: 0...200)
+            }
+            .disabled(!settings.peekEnabled)
+
+            Text("Hover near the map to preview.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            HStack {
+                Button("Change Map PDF…") { changePDF() }
+                Spacer()
+                Link(
+                    "Download Stanford Map",
+                    destination: URL(string: "https://mededucation.stanford.edu/pathways-download/")!
+                )
+            }
+        }
+    }
+
+    private func changePDF() {
+        MapFileManager.shared.chooseMap { success in
+            if success {
+                DispatchQueue.main.async { MapWindowController.shared.close() }
+            }
+        }
+    }
+}
+
+struct ShortcutOptionsView: View {
+
+    @ObservedObject private var settings = AppSettings.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+
+            Text("Click a field, then press the new key combination (include a modifier such as ⌘ or ⌥).")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            row(title: "Show / hide map", label: settings.mapLabel) { code, mods, label in
+                settings.mapKeyCode = code
+                settings.mapModifiers = mods
+                settings.mapLabel = label
+            }
+
+            row(title: "Open find bar", label: settings.findLabel) { code, mods, label in
+                settings.findKeyCode = code
+                settings.findModifiers = mods
+                settings.findLabel = label
+            }
+
+            Divider()
+
+            Text("OTHER SHORTCUTS")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            reference("Pan the map", "⌥⌘ + arrows")
+            reference("Zoom in / out", "⌥⌘ + / −")
+            reference("Resize window", "⌃⌘ + / −")
+            reference("Move window (grid)", "⌃⌘ + arrows")
+            reference("Return focus to last app", "⌥⌘B")
+            reference("Find in map (when focused)", "⌘F")
+        }
+    }
+
+    private func reference(_ title: String, _ keys: String) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(keys)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func row(
+        title: String,
+        label: String,
+        onCapture: @escaping (Int, UInt, String) -> Void
+    ) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            ShortcutRecorder(label: label, onCapture: onCapture)
+                .frame(width: 110, height: 22)
+        }
+    }
+}
+
+// MARK: - Shortcut recorder
+
+struct ShortcutRecorder: NSViewRepresentable {
+    let label: String
+    let onCapture: (Int, UInt, String) -> Void
+
+    func makeNSView(context: Context) -> RecorderButton {
+        let button = RecorderButton()
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.onCapture = onCapture
+        button.title = label
+        return button
+    }
+
+    func updateNSView(_ nsView: RecorderButton, context: Context) {
+        nsView.onCapture = onCapture
+        if !nsView.isRecording { nsView.title = label }
+    }
+}
+
+final class RecorderButton: NSButton {
+    var onCapture: ((Int, UInt, String) -> Void)?
+    private(set) var isRecording = false
+    private var monitor: Any?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        target = self
+        action = #selector(toggleRecording)
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        target = self
+        action = #selector(toggleRecording)
+    }
+
+    @objc private func toggleRecording() {
+        isRecording ? stopRecording() : startRecording()
+    }
+
+    private func startRecording() {
+        isRecording = true
+        title = "Press keys…"
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self else { return event }
+            let mods = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            if event.keyCode == 53 { self.stopRecording(); return nil }  // Esc cancels
+            guard !mods.isEmpty else { return nil }                       // require a modifier
+
+            let name = RecorderButton.keyName(for: Int(event.keyCode), chars: event.charactersIgnoringModifiers)
+            let label = shortcutLabel(keyCode: Int(event.keyCode), modifiers: mods.rawValue, keyName: name)
+            self.onCapture?(Int(event.keyCode), mods.rawValue, label)
+            self.title = label
+            self.stopRecording()
+            return nil
+        }
+    }
+
+    private func stopRecording() {
+        isRecording = false
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+    }
+
+    static func keyName(for keyCode: Int, chars: String?) -> String {
+        let specials: [Int: String] = [
+            123: "←", 124: "→", 125: "↓", 126: "↑",
+            49: "Space", 36: "↩", 48: "⇥", 53: "⎋", 51: "⌫", 117: "⌦"
+        ]
+        if let s = specials[keyCode] { return s }
+        if let c = chars, !c.isEmpty, c != " " { return c.uppercased() }
+        return "•"
+    }
+}

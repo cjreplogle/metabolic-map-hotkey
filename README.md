@@ -7,8 +7,8 @@ zoom, pan, and a cursor "peek-through" so you can glance at what's behind it.
 
 > [!NOTE]
 > The PDF is NOT included. Please download from [**here**](https://mededucation.stanford.edu/pathways-download/).
-> On first launch the app asks you to pick your local copy and remembers it; the
-> tray menu also has a shortcut to the download page.
+> On first launch the app asks you to pick your local copy and remembers it;
+> Options also has a **Download Stanford Map** link and a **Change Map PDF** button.
 
 ## Download
 
@@ -34,28 +34,36 @@ working the moment you toggle it on — no relaunch needed.
 
 ## Shortcuts
 
-Global (work from any app):
+Global (work from any app; ⌥⌘M / ⌥⌘S are rebindable in Options → Shortcuts):
 
-- **⌥⌘M** — show the map / bring it to front; hide it when it's already frontmost
+- **⌥⌘M** — show the map (without stealing focus) / hide it when it's frontmost
 - **⌥⌘S** — show the map and open the find bar
 - **⌥⌘ + arrows** — pan the map
+- **⌥⌘ + / −** — zoom the map in / out
+- **⌃⌘ + / −** — resize the window (anchored top-right)
+- **⌃⌘ + arrows** — snap the window across a 3×3 grid of screen positions
+- **⌥⌘B** — return focus to the app you were using before
 
-Inside the map window:
+With the map:
 
 - **⌘F** — find in map (live search; Return / ↑ ↓ to step matches, Esc to close)
-- **Ctrl +/−** — zoom in / out (smooth)
-- **⌘ + arrows** — pan
-- **⌘⇧ + arrows** — move the window around the screen
+- **Ctrl + / −** — zoom in / out
+- **drag** — pan (grab); **⌘-drag** — move the window
+- **scroll** — pan (diagonal supported)
 
 ## Features
 
-- Menu-bar app; the map opens over full-screen Spaces and can be pinned
-  **Always on Top**.
-- Cover-fit rendering that fills the window with no gray letterbox bars, with a
-  low-resolution underlay so panning/zooming doesn't flash white.
-- **Peek-through**: hover near the window and a soft circular hole lets you read
-  whatever is behind it (toggle in the tray menu).
-- Frameless rounded window, opens at a compact size in the top-right corner.
+- Menu-bar app with a live glucose→TCA metabolite icon that walks the pathway.
+- Shows over full-screen Spaces; optional **Always on Top**; **Launch at Login**.
+- Cover-fit rendering (no gray letterbox), with a low-res underlay so panning/
+  zooming doesn't flash white.
+- **Peek-through**: hover near the window and a soft, adjustable circular hole
+  lets you read whatever is behind it (fades out while the window is focused).
+- Adjustable **base transparency**; frameless rounded window; remembers your last
+  zoom/scroll position.
+- Built-in **update check** with one-click self-update (Options footer).
+
+All settings live in the tray menu's **Options…** window (General + Shortcuts tabs).
 
 ## Build from source
 

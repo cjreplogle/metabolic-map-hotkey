@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Fatty acid: zig-zag chain ending in a carboxyl -->
+  <path d="M2,15 L5,11 L8,15 L11,11 L14,15 L17,11"/>
+  <!-- carboxyl group -->
+  <path d="M17,11 L20.5,13"/>
+  <path d="M17,11 L17,7"/>
+  <circle cx="17" cy="5.4" r="1.1" fill="#000000" stroke="none"/>
+</svg>

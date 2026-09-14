@@ -24,6 +24,11 @@ if [ -f "Resources/AppIcon.png" ]; then
     cp Resources/AppIcon.png MetabolicMap.app/Contents/Resources/AppIcon.png
 fi
 
+# Bundle the menu-bar (status item) metabolite icons.
+for svg in Resources/*.svg; do
+    [ -f "$svg" ] && cp "$svg" MetabolicMap.app/Contents/Resources/
+done
+
 # Compile Swift code with -parse-as-library so @main is synthesized properly
 swiftc -parse-as-library MetabolicMapApp.swift \
   -o MetabolicMap.app/Contents/MacOS/MetabolicMap \
@@ -47,9 +52,9 @@ cat > MetabolicMap.app/Contents/Info.plist <<'PLIST'
     <key>CFBundleIconFile</key>
     <string>AppIcon.icns</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.5</string>
+    <string>1.6</string>
     <key>CFBundleVersion</key>
-    <string>6</string>
+    <string>7</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
@@ -70,5 +75,9 @@ else
     echo "Warning: signing identity not found; using ad-hoc (Accessibility grant will reset each build)."
 fi
 
-echo "Build successful! Launching MetabolicMap.app..."
+echo "Build successful! Relaunching MetabolicMap.app..."
+# Quit any running instance first — `open` alone only re-activates a running
+# LSUIElement app and would keep the OLD binary running.
+pkill -f "MetabolicMap.app/Contents/MacOS/MetabolicMap" 2>/dev/null
+sleep 0.5
 open MetabolicMap.app

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000000" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Pyranose (glucose) ring -->
+  <polygon points="12,7 17,9.5 17,15 12,17.5 7,15 7,9.5"/>
+  <!-- Ring oxygen marker (top vertex) -->
+  <circle cx="12" cy="7" r="1.15" fill="#000000" stroke="none"/>
+  <!-- CH2OH group (up-right) -->
+  <path d="M17,9.5 L20.5,8"/>
+  <path d="M20.5,8 L21.5,5"/>
+  <!-- Hydroxyl stubs -->
+  <path d="M17,15 L20.5,16.5"/>
+  <path d="M12,17.5 L12,21"/>
+  <path d="M7,15 L3.5,16.5"/>
+  <path d="M7,9.5 L3.5,8"/>
+</svg>

@@ -36,20 +36,18 @@ working the moment you toggle it on — no relaunch needed.
 
 Global (work from any app; ⌥⌘M / ⌥⌘S are rebindable in Options → Shortcuts):
 
-- **⌥⌘M** — show the map (without stealing focus) / hide it when it's frontmost
-- **⌥⌘S** — show the map and open the find bar
-- **⌥⌘ + arrows** — pan the map
-- **⌥⌘ + / −** — zoom the map in / out
-- **⌃⌘ + / −** — resize the window (anchored top-right)
-- **⌃⌘ + arrows** — snap the window across a 3×3 grid of screen positions
-- **⌥⌘B** — return focus to the app you were using before
+- **⌥⌘M**  show the map (without stealing focus) / hide it when it's frontmost
+- **⌥⌘S**  show the map and open the find bar
+- **⌥⌘ & ↑←↓→**  pan the map
+- **⌃⌘ & ↑←↓→**  snap the window across a 3×3 grid of screen positions
+- **⌥⌘ & +/−**  zoom the map in / out
+- **⌃⌘ & +/−**  resize the window (anchored top-right)
+- **⌥⌘B**  return focus to the app you were using before
 
-With the map:
-
-- **⌘F** — find in map (live search; Return / ↑ ↓ to step matches, Esc to close)
-- **Ctrl + / −** — zoom in / out
-- **drag** — pan (grab); **⌘-drag** — move the window
-- **scroll** — pan (diagonal supported)
+With the map focused:
+- **click+drag** — pan (grab)
+- **⌘-drag** — move the window
+- **trackpad scroll** - pan
 
 ## Features
 
@@ -82,3 +80,5 @@ survives rebuilds). If macOS reports `zsh: permission denied: ./build.sh`, run
 
 This project does not bundle or redistribute the Stanford metabolic-map PDF; it
 only views a copy you already have.
+
+[cjre.pl/ogle](https://cjre.pl/ogle/plain)

@@ -2,13 +2,12 @@
 
 A tiny native AppKit/SwiftUI/PDFKit viewer/search tool for a local copy of the Stanford Pathways of Human Metabolism PDF.
 
-## Important: the PDF is NOT included
-
-This project does **not** bundle or redistribute the Stanford metabolic-map PDF. On first launch, the app asks you to select the copy that is already on your Mac and stores a its location.
+> [!NOTE]
+> The PDF is NOT included. Please download from [here](https://mededucation.stanford.edu/pathways-download/).
 
 ## Build
 
-If macOS reports `zsh: permission denied: ./build.sh`, run `chmod +x build.sh` once, then run `./build.sh`. The v1.5 ZIP already preserves the executable bit.
+If macOS reports `zsh: permission denied: ./build.sh`, run `chmod +x build.sh` once, then run `./build.sh`.
 
 Requires macOS + Xcode Command Line Tools.
 

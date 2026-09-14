@@ -38,10 +38,10 @@ Global (work from any app; ⌥⌘M / ⌥⌘S are rebindable in Options → Short
 
 - **⌥⌘M**  show the map (without stealing focus) / hide it when it's frontmost
 - **⌥⌘S**  show the map and open the find bar
-- **⌥⌘ & ↑←↓→**  pan the map
-- **⌃⌘ & ↑←↓→**  snap the window across a 3×3 grid of screen positions
-- **⌥⌘ & +/−**  zoom the map in / out
-- **⌃⌘ & +/−**  resize the window (anchored top-right)
+- **⌥⌘→**  pan the map
+- **⌃⌘→**  snap the window across a 3×3 grid of screen positions
+- **⌥⌘ +/−**  zoom the map in / out
+- **⌃⌘ +/−**  resize the window (anchored top-right)
 - **⌥⌘B**  return focus to the app you were using before
 
 With the map focused:

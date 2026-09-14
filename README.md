@@ -1,4 +1,4 @@
-# Metabolic Map — quick-access metabolism map for macOS.
+# A quick-access metabolism map viewer for macOS.
 
 A tiny native AppKit/SwiftUI/PDFKit viewer/search tool for a local copy of the Stanford Pathways of Human Metabolism PDF.
 

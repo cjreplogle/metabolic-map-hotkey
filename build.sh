@@ -30,7 +30,11 @@ for svg in Resources/*.svg; do
 done
 
 # Compile Swift code with -parse-as-library so @main is synthesized properly
+# Pin the deployment target so the binary runs on macOS 14+, not just the build
+# machine's OS. Without this, swiftc stamps minos = the builder's macOS version
+# and other Macs report "not built for this version of macOS".
 swiftc -parse-as-library MetabolicMapApp.swift \
+  -target arm64-apple-macos14.0 \
   -o MetabolicMap.app/Contents/MacOS/MetabolicMap \
   -framework Cocoa -framework SwiftUI -framework PDFKit
 
@@ -52,9 +56,9 @@ cat > MetabolicMap.app/Contents/Info.plist <<'PLIST'
     <key>CFBundleIconFile</key>
     <string>AppIcon.icns</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.2</string>
+    <string>2.3</string>
     <key>CFBundleVersion</key>
-    <string>10</string>
+    <string>11</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>

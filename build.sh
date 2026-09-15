@@ -52,9 +52,9 @@ cat > MetabolicMap.app/Contents/Info.plist <<'PLIST'
     <key>CFBundleIconFile</key>
     <string>AppIcon.icns</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0</string>
+    <string>2.1</string>
     <key>CFBundleVersion</key>
-    <string>8</string>
+    <string>9</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
@@ -80,4 +80,7 @@ echo "Build successful! Relaunching MetabolicMap.app..."
 # LSUIElement app and would keep the OLD binary running.
 pkill -f "MetabolicMap.app/Contents/MacOS/MetabolicMap" 2>/dev/null
 sleep 0.5
-open MetabolicMap.app
+# Keep the /Applications copy (Spotlight-searchable) in sync and launch that one.
+rm -rf /Applications/MetabolicMap.app
+ditto MetabolicMap.app /Applications/MetabolicMap.app
+open /Applications/MetabolicMap.app

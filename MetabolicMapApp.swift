@@ -2320,9 +2320,26 @@ final class MapWindowController: NSObject {
         let minW = max(fitting.width, 200)
         let minH = max(fitting.height, 140)
 
-        // Fixed top-right corner (clamped to the screen).
-        let right = min(f.maxX, vf.maxX)
+        // Anchor horizontally so growing never pushes the window off-screen:
+        //  • left edge  when the window hugs the left,
+        //  • right edge when it hugs the right,
+        //  • center     when it's roughly centered (grow symmetrically).
         let top = min(f.maxY, vf.maxY)
+        let left = max(f.minX, vf.minX)
+        let right = min(f.maxX, vf.maxX)
+        let tol = max(24, f.width * 0.1)   // "centered" slop
+        enum HA { case left, center, right }
+        let ha: HA = abs(f.midX - vf.midX) <= tol ? .center
+                   : (f.midX < vf.midX ? .left : .right)
+
+        // Space available for growth given the anchor (center is limited by the
+        // tighter of the two sides, doubled).
+        let availW: CGFloat
+        switch ha {
+        case .left:   availW = vf.maxX - left
+        case .right:  availW = right - vf.minX
+        case .center: availW = 2 * min(f.midX - vf.minX, vf.maxX - f.midX)
+        }
 
         // Uniform scale (preserve aspect) so the window never narrows on one axis
         // after the other hits its limit. Clamp the factor to the min size and the
@@ -2331,13 +2348,19 @@ final class MapWindowController: NSObject {
         if factor < 1 {
             k = max(k, minW / f.width, minH / f.height)
         } else {
-            k = min(k, (right - vf.minX) / f.width, (top - vf.minY) / f.height)
+            k = min(k, availW / f.width, (top - vf.minY) / f.height)
         }
         guard abs(k - 1) > 0.001 else { return }
 
         let newW = f.width * k
         let newH = f.height * k
-        window.setFrame(NSRect(x: right - newW, y: top - newH, width: newW, height: newH), display: true)
+        let newX: CGFloat
+        switch ha {
+        case .left:   newX = left
+        case .right:  newX = right - newW
+        case .center: newX = f.midX - newW / 2
+        }
+        window.setFrame(NSRect(x: newX, y: top - newH, width: newW, height: newH), display: true)
     }
 
     /// Snaps the window to a cell of a 3×3 grid of screen positions (⌃⌘ + arrows).

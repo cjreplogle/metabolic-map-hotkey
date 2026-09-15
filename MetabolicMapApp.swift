@@ -360,6 +360,25 @@ func shortcutLabel(keyCode: Int, modifiers nsRaw: UInt, keyName: String) -> Stri
 /// Space, then drops it back to a normal window level so it is not permanently
 /// pinned above every other window.
 /// Offset (toward the window's nearest screen corner) used for the slide anim.
+// Canonical resting frame per window, so slide animations always start/end from
+// the window's true home position rather than a mid-animation (offset) frame.
+// Without this, spamming show/hide reads the in-flight frame as the new base and
+// the window drifts toward the screen edge.
+private var windowRestingFrames: [ObjectIdentifier: NSRect] = [:]
+private var slidingWindows: Set<ObjectIdentifier> = []
+
+func windowRestingFrame(_ window: NSWindow) -> NSRect {
+    windowRestingFrames[ObjectIdentifier(window)] ?? window.frame
+}
+
+func setWindowRestingFrame(_ window: NSWindow, _ frame: NSRect) {
+    windowRestingFrames[ObjectIdentifier(window)] = frame
+}
+
+func windowIsSliding(_ window: NSWindow) -> Bool {
+    slidingWindows.contains(ObjectIdentifier(window))
+}
+
 private func cornerSlideOffset(for window: NSWindow, distance: CGFloat = 45) -> CGSize {
     guard AppSettings.shared.slideAnimation else { return .zero }
     let vf = (window.screen ?? NSScreen.main)?.visibleFrame ?? window.frame
@@ -378,7 +397,12 @@ func presentWindow(_ window: NSWindow, activate: Bool = true, finalAlpha: CGFloa
     window.level = .floating
 
     // Start offset toward the window's corner, then fade + slide into place.
-    let finalFrame = window.frame
+    // Anchor to the canonical resting frame (never the live, possibly mid-slide
+    // frame) so rapid show/hide can't accumulate an offset and drift the window.
+    let finalFrame = windowRestingFrame(window)
+    setWindowRestingFrame(window, finalFrame)
+    let id = ObjectIdentifier(window)
+    slidingWindows.insert(id)
     let off = cornerSlideOffset(for: window)
     window.setFrame(finalFrame.offsetBy(dx: off.width, dy: off.height), display: false)
     window.alphaValue = 0
@@ -388,12 +412,16 @@ func presentWindow(_ window: NSWindow, activate: Bool = true, finalAlpha: CGFloa
     } else {
         window.orderFrontRegardless()
     }
-    NSAnimationContext.runAnimationGroup { context in
+    NSAnimationContext.runAnimationGroup({ context in
         context.duration = 0.22
         context.timingFunction = CAMediaTimingFunction(name: .easeOut)
         window.animator().setFrame(finalFrame, display: true)
         window.animator().alphaValue = finalAlpha
-    }
+    }, completionHandler: {
+        slidingWindows.remove(id)
+        // Guarantee the true resting frame regardless of where the animation ended.
+        if window.isVisible { window.setFrame(finalFrame, display: false) }
+    })
 
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
         // Drop back to a normal level unless the user pinned it on top.
@@ -406,7 +434,12 @@ func presentWindow(_ window: NSWindow, activate: Bool = true, finalAlpha: CGFloa
 /// Fades + slides a window out toward its corner, then orders it out (keeping the
 /// instance and restoring its frame for the next show).
 func fadeOutWindow(_ window: NSWindow, completion: (() -> Void)? = nil) {
-    let finalFrame = window.frame
+    // Anchor to the canonical resting frame so a hide that interrupts an in-flight
+    // show (or vice versa) still slides out from — and restores — the true home.
+    let finalFrame = windowRestingFrame(window)
+    setWindowRestingFrame(window, finalFrame)
+    let id = ObjectIdentifier(window)
+    slidingWindows.insert(id)
     let off = cornerSlideOffset(for: window)
     NSAnimationContext.runAnimationGroup({ context in
         context.duration = 0.18
@@ -414,6 +447,7 @@ func fadeOutWindow(_ window: NSWindow, completion: (() -> Void)? = nil) {
         window.animator().setFrame(finalFrame.offsetBy(dx: off.width, dy: off.height), display: true)
         window.animator().alphaValue = 0
     }, completionHandler: {
+        slidingWindows.remove(id)
         window.orderOut(nil)
         window.setFrame(finalFrame, display: false)
         window.alphaValue = 1
@@ -2360,7 +2394,13 @@ final class MapWindowController: NSObject {
         case .right:  newX = right - newW
         case .center: newX = f.midX - newW / 2
         }
-        window.setFrame(NSRect(x: newX, y: top - newH, width: newW, height: newH), display: true)
+        let target = NSRect(x: newX, y: top - newH, width: newW, height: newH)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.14
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            context.allowsImplicitAnimation = true
+            window.animator().setFrame(target, display: true)
+        }
     }
 
     /// Snaps the window to a cell of a 3×3 grid of screen positions (⌃⌘ + arrows).
@@ -2422,6 +2462,19 @@ extension MapWindowController: NSWindowDelegate {
         pdfView = nil
         container = nil
         postVisibilityChanged()
+    }
+
+    // Track the window's home position when the user genuinely moves/resizes it
+    // (dragging, grid snap, resize shortcut). Ignore frame changes during our own
+    // slide animations so the resting frame never captures a transient offset.
+    func windowDidMove(_ notification: Notification) {
+        guard let window, !windowIsSliding(window) else { return }
+        setWindowRestingFrame(window, window.frame)
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        guard let window, !windowIsSliding(window) else { return }
+        setWindowRestingFrame(window, window.frame)
     }
 }
 

@@ -12,7 +12,7 @@ zoom, pan, and a cursor "peek-through" so you can glance at what's behind it.
 
 <picture>
   <source srcset="https://raw.githubusercontent.com/cjreplogle/metabolic-map-hotkey/main/docs/demo.webp" type="image/webp">
-  <img src="https://raw.githubusercontent.com/cjreplogle/metabolic-map-hotkey/main/docs/demo.gif" alt="MetabolicMap in action" width="300">
+  <img src="https://raw.githubusercontent.com/cjreplogle/metabolic-map-hotkey/main/docs/demo.gif" alt="MetabolicMap in action" width="300" height="195">
 </picture>
 
 ## Download

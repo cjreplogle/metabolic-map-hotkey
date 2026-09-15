@@ -10,7 +10,10 @@ zoom, pan, and a cursor "peek-through" so you can glance at what's behind it.
 > On first launch the app asks you to pick your local copy and remembers it;
 > Options also has a **Download Stanford Map** link and a **Change Map PDF** button.
 
-<img src="Docs/demo.gif" alt="MetabolicMap in action" width="300">
+<video src="https://raw.githubusercontent.com/cjreplogle/metabolic-map-hotkey/main/docs/demo.webm" autoplay loop muted playsinline width="300">
+  <source src="https://raw.githubusercontent.com/cjreplogle/metabolic-map-hotkey/main/docs/demo.webm" type="video/webm">
+  <img src="https://raw.githubusercontent.com/cjreplogle/metabolic-map-hotkey/main/docs/demo.gif" alt="MetabolicMap in action" width="300">
+</video>
 
 ## Download
 

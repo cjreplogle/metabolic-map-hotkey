@@ -10,6 +10,17 @@ zoom, pan, and a cursor "peek-through" so you can glance at what's behind it.
 > On first launch the app asks you to pick your local copy and remembers it;
 > Options also has a **Download Stanford Map** link and a **Change Map PDF** button.
 
+## Demo
+
+<details>
+<summary>▶︎ See it in action</summary>
+
+<br>
+
+![MetabolicMap in action](docs/demo.gif)
+
+</details>
+
 ## Download
 
 Grab the prebuilt app from the
@@ -61,7 +72,8 @@ With the map focused:
   zoom/scroll position.
 - Built-in **update check** with one-click self-update (Options footer).
 
-All settings live in the tray menu's **Options…** window (General + Shortcuts tabs).
+All settings live in the tray menu's **Options…** window (General, Shortcuts,
+and Animation tabs).
 
 ## Build from source
 

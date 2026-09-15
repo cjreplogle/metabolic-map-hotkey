@@ -30,6 +30,27 @@ func configureWindowAppearance(_ window: NSWindow) {
     }
 }
 
+extension Notification.Name {
+    static let mmIconColoringChanged = Notification.Name("mmIconColoringChanged")
+    static let mmIconModeChanged = Notification.Name("mmIconModeChanged")
+    static let mmMapVisibilityChanged = Notification.Name("mmMapVisibilityChanged")
+}
+
+// Tray animation mode.
+enum IconMode: Int, CaseIterable, Identifiable {
+    case alwaysPlay = 0
+    case playWhenOpen = 1
+    case alwaysPause = 2
+    var id: Int { rawValue }
+    var label: String {
+        switch self {
+        case .alwaysPlay: return "Always"
+        case .playWhenOpen: return "When Open"
+        case .alwaysPause: return "Paused"
+        }
+    }
+}
+
 /// User-adjustable settings, persisted to UserDefaults and applied live.
 final class AppSettings: ObservableObject {
     static let shared = AppSettings()
@@ -81,10 +102,55 @@ final class AppSettings: ObservableObject {
     @Published var invertPan: Bool {
         didSet { defaults.set(invertPan, forKey: "invertPan") }
     }
+    // Click-through: the map ignores mouse events (clicks/scroll pass to the app
+    // below) and hides its window buttons; adjust the view with keyboard shortcuts.
+    @Published var clickThrough: Bool {
+        didSet {
+            defaults.set(clickThrough, forKey: "clickThrough")
+            MapWindowController.shared.applyClickThrough()
+        }
+    }
+    // Color the tray metabolite oxygens red (off = monochrome, adapts to menu bar).
+    @Published var colorOxygen: Bool {
+        didSet {
+            defaults.set(colorOxygen, forKey: "colorOxygen")
+            NotificationCenter.default.post(name: .mmIconColoringChanged, object: nil)
+        }
+    }
+    @Published var fullCarboxylate: Bool {
+        didSet {
+            defaults.set(fullCarboxylate, forKey: "fullCarboxylate")
+            NotificationCenter.default.post(name: .mmIconColoringChanged, object: nil)
+        }
+    }
+    @Published var iconModeRaw: Int {
+        didSet {
+            defaults.set(iconModeRaw, forKey: "iconModeRaw")
+            NotificationCenter.default.post(name: .mmIconModeChanged, object: nil)
+        }
+    }
+    var iconMode: IconMode { IconMode(rawValue: iconModeRaw) ?? .alwaysPlay }
+    // Slide the map window in/out from its corner (in addition to the fade).
+    @Published var slideAnimation: Bool {
+        didSet { defaults.set(slideAnimation, forKey: "slideAnimation") }
+    }
     // Overall map-window transparency (0 = opaque, applied even when not peeking).
     @Published var baseTransparency: Double {
         didSet { defaults.set(baseTransparency, forKey: "baseTransparency"); MapWindowController.shared.applyBaseTransparency() }
     }
+    // Tray metabolism-walk speed, 0…1 (log scale: 0 = 1 step / 6 s, 1 = 15 / s).
+    @Published var metabolismSpeed: Double {
+        didSet { defaults.set(metabolismSpeed, forKey: "metabolismSpeed") }
+    }
+
+    /// Per-step delay for the tray metabolite walk (log-interpolated).
+    var metabolismDelay: TimeInterval {
+        let minDelay = 1.0 / 15.0, maxDelay = 6.0
+        let t = min(max(metabolismSpeed, 0), 1)
+        return exp(log(maxDelay) + (log(minDelay) - log(maxDelay)) * t)
+    }
+    /// Steps per second, for display.
+    var metabolismStepsPerSecond: Double { 1.0 / metabolismDelay }
 
     // Global shortcuts. Modifiers are stored as NSEvent.ModifierFlags raw values.
     @Published var mapKeyCode: Int {
@@ -109,22 +175,28 @@ final class AppSettings: ObservableObject {
     private static let defaultModifiers = NSEvent.ModifierFlags([.command, .option]).rawValue
 
     private init() {
-        alwaysOnTop = defaults.bool(forKey: "alwaysOnTop")
-        peekEnabled = defaults.object(forKey: "peekEnabled") as? Bool ?? true
+        alwaysOnTop = defaults.object(forKey: "alwaysOnTop") as? Bool ?? true
+        peekEnabled = defaults.object(forKey: "peekEnabled") as? Bool ?? false
         launchAtLogin = (SMAppService.mainApp.status == .enabled)
-        peekRadius = defaults.object(forKey: "peekRadius") as? Double ?? 95
-        peekTransparency = defaults.object(forKey: "peekTransparency") as? Double ?? 0.6
-        peekFade = defaults.object(forKey: "peekFade") as? Double ?? 55
+        peekRadius = defaults.object(forKey: "peekRadius") as? Double ?? 53.9
+        peekTransparency = defaults.object(forKey: "peekTransparency") as? Double ?? 1
+        peekFade = defaults.object(forKey: "peekFade") as? Double ?? 200
         invertPan = defaults.bool(forKey: "invertPan")
-        baseTransparency = defaults.object(forKey: "baseTransparency") as? Double ?? 0
+        clickThrough = defaults.bool(forKey: "clickThrough")
+        colorOxygen = defaults.object(forKey: "colorOxygen") as? Bool ?? true
+        fullCarboxylate = defaults.object(forKey: "fullCarboxylate") as? Bool ?? true
+        iconModeRaw = defaults.object(forKey: "iconModeRaw") as? Int ?? 1
+        slideAnimation = defaults.object(forKey: "slideAnimation") as? Bool ?? true
+        baseTransparency = defaults.object(forKey: "baseTransparency") as? Double ?? 0.087
+        metabolismSpeed = defaults.object(forKey: "metabolismSpeed") as? Double ?? 0.82
 
-        // Defaults: ⌥⌘M (keyCode 46) and ⌥⌘S (keyCode 1).
+        // Defaults: ⌘M (keyCode 46) and ⌥⌘F (keyCode 3).
         mapKeyCode = defaults.object(forKey: "mapKeyCode") as? Int ?? 46
-        mapModifiers = defaults.object(forKey: "mapModifiers") as? UInt ?? Self.defaultModifiers
-        mapLabel = defaults.string(forKey: "mapLabel") ?? "⌥⌘M"
-        findKeyCode = defaults.object(forKey: "findKeyCode") as? Int ?? 1
+        mapModifiers = defaults.object(forKey: "mapModifiers") as? UInt ?? NSEvent.ModifierFlags.command.rawValue
+        mapLabel = defaults.string(forKey: "mapLabel") ?? "⌘M"
+        findKeyCode = defaults.object(forKey: "findKeyCode") as? Int ?? 3
         findModifiers = defaults.object(forKey: "findModifiers") as? UInt ?? Self.defaultModifiers
-        findLabel = defaults.string(forKey: "findLabel") ?? "⌥⌘S"
+        findLabel = defaults.string(forKey: "findLabel") ?? "⌥⌘F"
     }
 
     /// Alpha of the map inside the hole (inverse of transparency).
@@ -287,21 +359,39 @@ func shortcutLabel(keyCode: Int, modifiers nsRaw: UInt, keyName: String) -> Stri
 /// Brings a window to the front so it can appear over another app's full-screen
 /// Space, then drops it back to a normal window level so it is not permanently
 /// pinned above every other window.
+/// Offset (toward the window's nearest screen corner) used for the slide anim.
+private func cornerSlideOffset(for window: NSWindow, distance: CGFloat = 45) -> CGSize {
+    guard AppSettings.shared.slideAnimation else { return .zero }
+    let vf = (window.screen ?? NSScreen.main)?.visibleFrame ?? window.frame
+    let tol: CGFloat = 40   // treat as "centered" within this tolerance
+    let cx = window.frame.midX - vf.midX
+    let cy = window.frame.midY - vf.midY
+    let dx: CGFloat = abs(cx) < tol ? 0 : (cx < 0 ? -1 : 1)
+    var dy: CGFloat = abs(cy) < tol ? 0 : (cy < 0 ? -1 : 1)
+    // If centered horizontally (or fully), slide vertically (top/bottom).
+    if dx == 0, dy == 0 { dy = -1 }
+    return CGSize(width: dx * distance, height: dy * distance)
+}
+
 func presentWindow(_ window: NSWindow, activate: Bool = true, finalAlpha: CGFloat = 1) {
     window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
     window.level = .floating
-    // Fade in.
+
+    // Start offset toward the window's corner, then fade + slide into place.
+    let finalFrame = window.frame
+    let off = cornerSlideOffset(for: window)
+    window.setFrame(finalFrame.offsetBy(dx: off.width, dy: off.height), display: false)
     window.alphaValue = 0
     if activate {
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
     } else {
-        // Show on top without stealing focus from the current app.
         window.orderFrontRegardless()
     }
     NSAnimationContext.runAnimationGroup { context in
-        context.duration = 0.2
+        context.duration = 0.22
         context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        window.animator().setFrame(finalFrame, display: true)
         window.animator().alphaValue = finalAlpha
     }
 
@@ -313,14 +403,19 @@ func presentWindow(_ window: NSWindow, activate: Bool = true, finalAlpha: CGFloa
     }
 }
 
-/// Fades a window out, then orders it out (keeping the instance).
+/// Fades + slides a window out toward its corner, then orders it out (keeping the
+/// instance and restoring its frame for the next show).
 func fadeOutWindow(_ window: NSWindow, completion: (() -> Void)? = nil) {
+    let finalFrame = window.frame
+    let off = cornerSlideOffset(for: window)
     NSAnimationContext.runAnimationGroup({ context in
         context.duration = 0.18
         context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+        window.animator().setFrame(finalFrame.offsetBy(dx: off.width, dy: off.height), display: true)
         window.animator().alphaValue = 0
     }, completionHandler: {
         window.orderOut(nil)
+        window.setFrame(finalFrame, display: false)
         window.alphaValue = 1
         completion?()
     })
@@ -589,41 +684,185 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var metaboliteIcons: [NSImage] = []
     private var iconIndex = 0
+    private var iconDirection = 1
+    private var tcaLoopsRemaining = 0
+    private var hexoseLoopsRemaining = 0
+    private var tcaStartIndex = 6
     private var iconTimer: Timer?
 
+    /// Advances the pathway walk. Both the hexose (6-carbon: glucose…F1,6BP) and
+    /// the TCA cycle segments spin several extra times, so the walk dwells about
+    /// evenly in 6-carbon metabolism and the TCA cycle.
+    private func advancePathway() {
+        let count = metaboliteIcons.count
+        guard count > 1 else { return }
+        let hexTop = min(2, count - 1)          // F1,6BP
+        let tcaStart = min(tcaStartIndex, count - 1)   // citrate (dynamic)
+        let tcaEnd = count - 1                  // oxaloacetate
+
+        if iconDirection > 0 {
+            if iconIndex == 0 {
+                // Start of a forward pass through the hexose phase: cycle it a few
+                // times (more loops than TCA since it has fewer intermediates).
+                hexoseLoopsRemaining = (Int.random(in: 0..<100) < 85) ? Int.random(in: 3...6) : 0
+                iconIndex = 1
+            } else if iconIndex == hexTop {
+                if hexoseLoopsRemaining > 0 {
+                    hexoseLoopsRemaining -= 1
+                    iconIndex = 0               // loop the hexose phase
+                } else {
+                    iconIndex += 1              // proceed into lower glycolysis
+                }
+            } else if iconIndex == tcaEnd {
+                if tcaLoopsRemaining > 0 {
+                    tcaLoopsRemaining -= 1
+                    iconIndex = tcaStart        // loop the TCA cycle
+                } else {
+                    iconDirection = -1
+                    iconIndex -= 1
+                }
+            } else {
+                iconIndex += 1
+                if iconIndex == tcaStart {
+                    tcaLoopsRemaining = (Int.random(in: 0..<100) < 85) ? Int.random(in: 2...3) : 0
+                }
+            }
+        } else {
+            if iconIndex <= 1 {
+                iconDirection = 1
+                iconIndex = 0
+            } else {
+                iconIndex -= 1
+            }
+        }
+    }
+
+    private var splitIcon: NSImage?
+    private var hmpIcons: [NSImage] = []
+    private var frameQueue: [(image: NSImage, delay: TimeInterval)] = []
+
+    private func loadTemplateSVG(_ name: String) -> NSImage? {
+        guard let url = Bundle.main.url(forResource: name, withExtension: "svg"),
+              let image = NSImage(contentsOf: url) else { return nil }
+        image.size = NSSize(width: 18, height: 18)
+        // Non-template shows the red oxygens; template renders monochrome/adaptive.
+        image.isTemplate = !AppSettings.shared.colorOxygen
+        return image
+    }
+
+    /// Reloads the icons (color mode / full-carboxylate can change which files are
+    /// used) and refreshes the current frame.
+    private func applyIconColoring() {
+        loadMetaboliteIcons()
+        if let button = statusItem?.button, !metaboliteIcons.isEmpty {
+            button.image = metaboliteIcons[min(iconIndex, metaboliteIcons.count - 1)]
+        }
+    }
+
     private func loadMetaboliteIcons() {
+        splitIcon = loadTemplateSVG("SplitIcon")
+        hmpIcons = ["Hmp0_6pg", "Hmp1_ru5p"].compactMap { loadTemplateSVG($0) }
         // Ordered glycolysis → TCA intermediates (Path00_… Path11_…).
         let urls = (Bundle.main.urls(forResourcesWithExtension: "svg", subdirectory: nil) ?? [])
-            .filter { $0.lastPathComponent.hasPrefix("Path") }
+            .filter { $0.lastPathComponent.hasPrefix("Path") && !$0.lastPathComponent.contains("_full") }
             .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        tcaStartIndex = urls.firstIndex { $0.lastPathComponent.contains("citrate") } ?? 6
+
+        let full = AppSettings.shared.fullCarboxylate
+        let template = !AppSettings.shared.colorOxygen
         metaboliteIcons = urls.compactMap { url in
-            guard let image = NSImage(contentsOf: url) else { return nil }
+            var use = url
+            if full {
+                let fullName = url.deletingPathExtension().lastPathComponent + "_full"
+                if let fullURL = Bundle.main.url(forResource: fullName, withExtension: "svg") {
+                    use = fullURL
+                }
+            }
+            guard let image = NSImage(contentsOf: use) else { return nil }
             image.size = NSSize(width: 18, height: 18)
-            image.isTemplate = true
+            image.isTemplate = template
             return image
         }
     }
 
     private func startIconCycling() {
-        iconTimer?.invalidate()
+        statusItem?.button?.wantsLayer = true
+        applyIconMode()
+    }
+
+    /// Starts/stops the walk per the selected mode and the map's visibility.
+    private func applyIconMode() {
         guard metaboliteIcons.count > 1 else { return }
-        iconTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: true) { [weak self] _ in
-            guard let self, let button = self.statusItem?.button else { return }
-            // Random walk up/down the pathway.
-            let step = Bool.random() ? 1 : -1
-            self.iconIndex = min(max(self.iconIndex + step, 0), self.metaboliteIcons.count - 1)
-            let next = self.metaboliteIcons[self.iconIndex]
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.3
-                button.animator().alphaValue = 0
-            } completionHandler: {
-                button.image = next
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.3
-                    button.animator().alphaValue = 1
-                }
-            }
+        switch AppSettings.shared.iconMode {
+        case .alwaysPlay:
+            resumeCycling()
+        case .playWhenOpen:
+            MapWindowController.shared.isMapVisible ? resumeCycling() : pauseOnGlucose()
+        case .alwaysPause:
+            pauseOnGlucose()
         }
+    }
+
+    private func resumeCycling() {
+        guard iconTimer == nil else { return }
+        scheduleNextFrame()
+    }
+
+    private func pauseOnGlucose() {
+        iconTimer?.invalidate()
+        iconTimer = nil
+        frameQueue.removeAll()
+        iconIndex = 0
+        iconDirection = 1
+        if let button = statusItem?.button, let glucose = metaboliteIcons.first {
+            animatePathwayStep(to: glucose, forward: true, on: button)
+        }
+    }
+
+    /// Displays the next queued frame (or builds new ones), self-scheduling with a
+    /// per-frame delay so glycolysis runs faster than the TCA cycle.
+    private func scheduleNextFrame() {
+        iconTimer?.invalidate()
+        if frameQueue.isEmpty { buildNextFrames() }
+        guard !frameQueue.isEmpty, let button = statusItem?.button else { return }
+        let frame = frameQueue.removeFirst()
+        animatePathwayStep(to: frame.image, forward: iconDirection > 0, on: button)
+        iconTimer = Timer.scheduledTimer(withTimeInterval: frame.delay, repeats: false) { [weak self] _ in
+            self?.scheduleNextFrame()
+        }
+    }
+
+    private func buildNextFrames() {
+        guard !metaboliteIcons.isEmpty else { return }
+        let prev = iconIndex
+        let delay = AppSettings.shared.metabolismDelay
+
+        // Occasionally branch off the HMP (pentose phosphate) shunt from G6P.
+        if iconIndex == 1, iconDirection > 0, !hmpIcons.isEmpty, Int.random(in: 0..<100) < 10 {
+            for img in hmpIcons { frameQueue.append((img, delay)) }
+            for img in hmpIcons.reversed() { frameQueue.append((img, delay)) }
+            frameQueue.append((metaboliteIcons[1], delay))  // rejoin at G6P
+            return
+        }
+
+        advancePathway()
+        let newIndex = iconIndex
+
+        // Aldolase split/merge (F1,6BP 2 <-> G3P 3): flash the two-fragment frame.
+        if min(prev, newIndex) == 2, max(prev, newIndex) == 3, let split = splitIcon {
+            frameQueue.append((split, delay))
+        }
+        frameQueue.append((metaboliteIcons[newIndex], delay))
+    }
+
+    /// Crossfades (dissolves) between the old and new icon.
+    private func animatePathwayStep(to image: NSImage, forward: Bool, on button: NSStatusBarButton) {
+        let transition = CATransition()
+        transition.type = .fade
+        transition.duration = min(0.18, AppSettings.shared.metabolismDelay * 0.85)
+        transition.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        button.layer?.add(transition, forKey: "pathwayCrossfade")
+        button.image = image
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -655,9 +894,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             loadMetaboliteIcons()
             button.image = metaboliteIcons.first
                 ?? NSImage(systemSymbolName: "map", accessibilityDescription: "Metabolic Map")
-            button.image?.isTemplate = true
+            button.image?.isTemplate = !AppSettings.shared.colorOxygen
             button.toolTip = "Metabolic Map"
             startIconCycling()
+            NotificationCenter.default.addObserver(
+                forName: .mmIconColoringChanged, object: nil, queue: .main
+            ) { [weak self] _ in self?.applyIconColoring() }
+            NotificationCenter.default.addObserver(
+                forName: .mmIconModeChanged, object: nil, queue: .main
+            ) { [weak self] _ in self?.applyIconMode() }
+            NotificationCenter.default.addObserver(
+                forName: .mmMapVisibilityChanged, object: nil, queue: .main
+            ) { [weak self] _ in self?.applyIconMode() }
         }
 
         let menu = NSMenu()
@@ -885,7 +1133,6 @@ final class PanningPDFView: PDFView {
         }
         clip.setBoundsOrigin(origin)
         scroll?.reflectScrolledClipView(clip)
-        scroll?.documentView?.needsDisplay = true   // re-render newly exposed area
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -896,23 +1143,13 @@ final class PanningPDFView: PDFView {
         addCursorRect(bounds, cursor: .openHand)
     }
 
-    // Handle trackpad/wheel scrolling ourselves and hard-clamp to the page so
-    // there is no elastic over-scroll past the edges.
-    override func scrollWheel(with event: NSEvent) {
-        guard let scrollView = scroll else { super.scrollWheel(with: event); return }
-        let clip = scrollView.contentView
-        var origin = clip.bounds.origin
-        origin.x -= event.scrollingDeltaX
-        origin.y -= event.scrollingDeltaY
-
-        if let doc = scrollView.documentView {
-            origin.x = min(max(0, origin.x), max(0, doc.frame.width - clip.bounds.width))
-            origin.y = min(max(0, origin.y), max(0, doc.frame.height - clip.bounds.height))
-        }
-        clip.setBoundsOrigin(origin)
-        scrollView.reflectScrolledClipView(clip)
-        scrollView.documentView?.needsDisplay = true   // re-render newly exposed area
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 49 { return }   // swallow Space (no page jump / break-through)
+        super.keyDown(with: event)
     }
+
+    // Trackpad/wheel scrolling is left to PDFKit (native) so it re-tiles correctly;
+    // the centering clip view hard-clamps the scroll to prevent over-scroll.
 }
 
 /// Hosts the PDFView plus an in-window ⌘F find bar (search field, prev/next,
@@ -941,6 +1178,7 @@ final class MapContainerView: NSView {
     private var searchGeneration = 0
     private var zoomTimer: Timer?
     private var zoomTargetScale: CGFloat = 1
+    private var isZooming = false
     private var didRestore = false
     private var saveTimer: Timer?
     // Set once the user manually zooms/pans, so the auto fill-zoom on layout does
@@ -1089,7 +1327,8 @@ final class MapContainerView: NSView {
     /// Fades the bottom-right zoom controls in when the cursor is near the corner.
     private func updateZoomControls(near viewPoint: NSPoint?) {
         let show: Bool
-        if let p = viewPoint {
+        // No on-screen buttons in click-through (keyboard-only) mode.
+        if let p = viewPoint, !AppSettings.shared.clickThrough {
             let corner = NSPoint(x: bounds.maxX, y: bounds.minY)
             show = hypot(p.x - corner.x, p.y - corner.y) < 170
         } else {
@@ -1213,7 +1452,6 @@ final class MapContainerView: NSView {
         }) {
             mouseMonitors.append(local)
         }
-
         let center = NotificationCenter.default
         focusObservers.append(center.addObserver(
             forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
@@ -1263,7 +1501,14 @@ final class MapContainerView: NSView {
             return
         }
         let viewPoint = convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
-        updateZoomControls(near: bounds.contains(viewPoint) ? viewPoint : nil)
+        let overWindow = bounds.contains(viewPoint)
+        updateZoomControls(near: overWindow ? viewPoint : nil)
+
+        // Click-through: capture events (so scroll pans the map, no double-scroll)
+        // only while the cursor is over the window; pass through everywhere else.
+        if AppSettings.shared.clickThrough {
+            window.ignoresMouseEvents = !overWindow
+        }
 
         guard !peekSuppressed else { return }   // peek disabled while window is focused
         guard AppSettings.shared.peekEnabled else {
@@ -1292,7 +1537,8 @@ final class MapContainerView: NSView {
     }
 
     private func updatePeekMask() {
-        guard AppSettings.shared.peekEnabled, peekStrength > 0.001,
+        guard !isZooming,
+              AppSettings.shared.peekEnabled, peekStrength > 0.001,
               let center = peekCenter, bounds.width > 1, bounds.height > 1 else {
             layer?.mask = nil
             return
@@ -1381,23 +1627,17 @@ final class MapContainerView: NSView {
         startPeekTracking()
 
         if let scrollView = pdfScrollView {
-            // Allow free diagonal trackpad scrolling (no axis lock) and stop the
-            // rubber-band over-scroll that exposed a gray bar past the top.
+            // Allow free diagonal trackpad scrolling (no axis lock) and reduce the
+            // rubber-band over-scroll. Keep PDFKit's own clip view so tile
+            // rendering isn't broken while scrolling.
             scrollView.usesPredominantAxisScrolling = false
             scrollView.verticalScrollElasticity = .none
             scrollView.horizontalScrollElasticity = .none
 
-            // Swap in a centering clip view so a zoomed-out page stays centered.
-            let doc = scrollView.documentView
-            let clip = CenteringClipView()
-            clip.drawsBackground = false
-            scrollView.contentView = clip
-            scrollView.documentView = doc
-
-            clip.postsBoundsChangedNotifications = true
+            scrollView.contentView.postsBoundsChangedNotifications = true
             scrollObserver = NotificationCenter.default.addObserver(
                 forName: NSView.boundsDidChangeNotification,
-                object: clip,
+                object: scrollView.contentView,
                 queue: .main
             ) { [weak self] _ in
                 self?.updateUnderlayFrame()
@@ -1430,7 +1670,7 @@ final class MapContainerView: NSView {
     /// Renders the page once at low resolution for the underlay.
     private func lowResImage(of page: PDFPage) -> NSImage {
         let box = page.bounds(for: .cropBox)
-        let maxDimension: CGFloat = 1600
+        let maxDimension: CGFloat = 2600
         let scale = min(maxDimension / max(box.width, box.height), 1)
         let size = NSSize(width: box.width * scale, height: box.height * scale)
 
@@ -1612,37 +1852,53 @@ final class MapContainerView: NSView {
         )
     }
 
-    /// Smoothly zooms in/out by `factor`. PDFView keeps the view center fixed when
-    /// scaleFactor changes, so we only animate the scale (re-centering here caused
-    /// the view to drift on each zoom). Repeated calls (key repeat) extend the same
-    /// animation's target instead of starting a new one, avoiding render churn.
+    /// Smoothly zooms in/out by `factor`. The animation is done with a GPU layer
+    /// transform on the already-rendered content (no per-frame PDFKit re-tiling,
+    /// so no white flicker); the real scaleFactor is committed once at the end.
     private func smoothZoom(by factor: CGFloat) {
-        let base = (zoomTimer != nil) ? zoomTargetScale : pdfView.scaleFactor
+        let starting = (zoomTimer == nil)
+        let base = starting ? pdfView.scaleFactor : zoomTargetScale
         zoomTargetScale = min(max(base * factor, 0.05), 8.0)
         userControlledView = true
+        guard starting else { return }   // key-repeat just extends the target
 
-        if zoomTimer != nil { return }  // already animating toward the target
+        // Hide the peek hole while zooming, and bring the (opaque, hi-res) underlay
+        // in front so it covers PDFKit's blank white tiles during re-render.
+        isZooming = true
+        layer?.mask = nil
+        underlay.layer?.zPosition = 1
 
         zoomTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
             guard let self else { timer.invalidate(); return }
-
             let current = self.pdfView.scaleFactor
-            let target = self.zoomTargetScale
-            // Ease toward the (possibly moving) target; stop when close enough.
-            let next = current + (target - current) * 0.25
+            let next = current + (self.zoomTargetScale - current) * 0.28
 
             self.isAdjustingZoom = true
             self.pdfView.scaleFactor = next
             self.isAdjustingZoom = false
+            self.pdfView.layoutSubtreeIfNeeded()
             self.updateUnderlayFrame()
 
-            if abs(target - next) < 0.002 {
+            if abs(self.zoomTargetScale - next) < 0.002 {
                 self.isAdjustingZoom = true
-                self.pdfView.scaleFactor = target
+                self.pdfView.scaleFactor = self.zoomTargetScale
                 self.isAdjustingZoom = false
+                self.pdfView.layoutSubtreeIfNeeded()
                 self.updateUnderlayFrame()
                 timer.invalidate()
                 self.zoomTimer = nil
+                self.isZooming = false
+                // Cross-fade the in-front underlay out while PDFKit renders under it,
+                // so there's no hard reveal of unrendered (white) tiles.
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = 0.55
+                    self.underlay.animator().alphaValue = 0
+                }, completionHandler: { [weak self] in
+                    guard let self else { return }
+                    self.underlay.layer?.zPosition = 0
+                    self.underlay.alphaValue = 1
+                })
+                self.updatePeekMask()   // restore the peek hole at the cursor
             }
         }
     }
@@ -1822,6 +2078,12 @@ final class MapWindowController: NSObject {
     private var gridCol = 2
     private var gridRow = 0
 
+    var isMapVisible: Bool { window?.isVisible ?? false }
+
+    private func postVisibilityChanged() {
+        NotificationCenter.default.post(name: .mmMapVisibilityChanged, object: nil)
+    }
+
     /// Ensures the map window exists and is frontmost. Returns the live PDFView,
     /// or nil if the PDF could not be opened.
     @discardableResult
@@ -1838,6 +2100,7 @@ final class MapWindowController: NSObject {
 
         if let existing = window {
             presentWindow(existing, activate: activate, finalAlpha: AppSettings.shared.baseAlpha)
+            postVisibilityChanged()
             return pdfView
         }
 
@@ -1925,7 +2188,9 @@ final class MapWindowController: NSObject {
         self.pdfView = pdfView
         self.container = container
 
+        applyClickThrough()
         presentWindow(window, activate: activate, finalAlpha: AppSettings.shared.baseAlpha)
+        postVisibilityChanged()
         return pdfView
     }
 
@@ -2001,7 +2266,7 @@ final class MapWindowController: NSObject {
     func toggle() {
         if let window, window.isVisible {
             container?.saveViewState()
-            fadeOutWindow(window)
+            fadeOutWindow(window) { [weak self] in self?.postVisibilityChanged() }
         } else {
             show(activate: false)
         }
@@ -2016,6 +2281,16 @@ final class MapWindowController: NSObject {
 
     func setAlwaysOnTop(_ on: Bool) {
         window?.level = on ? .floating : .normal
+    }
+
+    /// Applies click-through: window ignores mouse events and hides its buttons.
+    func applyClickThrough() {
+        guard let window else { return }
+        let on = AppSettings.shared.clickThrough
+        window.ignoresMouseEvents = on
+        window.standardWindowButton(.closeButton)?.isHidden = on
+        window.standardWindowButton(.zoomButton)?.isHidden = true
+        window.standardWindowButton(.miniaturizeButton)?.isHidden = true
     }
 
     func refreshPeek() {
@@ -2074,8 +2349,9 @@ final class MapWindowController: NSObject {
         let vf = screen.visibleFrame
         let w = window.frame.width
         let h = window.frame.height
-        let xs = [vf.minX, vf.midX - w / 2, vf.maxX - w]
-        let ys = [vf.maxY - h, vf.midY - h / 2, vf.minY]   // row 0 = top
+        let m: CGFloat = 20   // buffer from the screen edge (matches default open position)
+        let xs = [vf.minX + m, vf.midX - w / 2, vf.maxX - w - m]
+        let ys = [vf.maxY - h - m, vf.midY - h / 2, vf.minY + m]   // row 0 = top
 
         let origin = NSPoint(x: xs[gridCol], y: ys[gridRow])
         NSAnimationContext.runAnimationGroup { context in
@@ -2122,6 +2398,7 @@ extension MapWindowController: NSWindowDelegate {
         window = nil
         pdfView = nil
         container = nil
+        postVisibilityChanged()
     }
 }
 
@@ -2132,6 +2409,7 @@ final class OptionsWindowController: NSObject {
 
     static let shared = OptionsWindowController()
     private var window: NSWindow?
+    private var hosting: NSHostingView<OptionsView>?
 
     func show() {
         if let window {
@@ -2153,7 +2431,21 @@ final class OptionsWindowController: NSObject {
         window.center()
         window.delegate = self
         self.window = window
+        self.hosting = hosting
         presentWindow(window)
+    }
+
+    /// Resizes the window to fit the current tab's content (keeping the top-left
+    /// corner fixed, since the title bar is at the top).
+    func fitToContent() {
+        guard let window, let hosting else { return }
+        let size = hosting.fittingSize
+        var frame = window.frame
+        let top = frame.maxY
+        frame.size.height = size.height + (frame.height - window.contentLayoutRect.height)
+        frame.size.width = size.width
+        frame.origin.y = top - frame.size.height   // keep top edge fixed
+        window.setFrame(frame, display: true, animate: false)
     }
 }
 
@@ -2174,22 +2466,26 @@ struct OptionsView: View {
             Picker("", selection: $tab) {
                 Text("General").tag(0)
                 Text("Shortcuts").tag(1)
+                Text("Animation").tag(2)
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .controlSize(.small)
-            .frame(width: 190)
+            .frame(width: 260)
             .padding(.top, 8)
             .padding(.bottom, 6)
+            .onChange(of: tab) {
+                DispatchQueue.main.async { OptionsWindowController.shared.fitToContent() }
+            }
 
             Group {
-                if tab == 0 {
-                    GeneralOptionsView()
-                } else {
-                    ShortcutOptionsView()
+                switch tab {
+                case 1: ShortcutOptionsView()
+                case 2: AnimationOptionsView()
+                default: GeneralOptionsView()
                 }
             }
-            .frame(maxWidth: .infinity, minHeight: 300, alignment: .top)
+            .frame(maxWidth: .infinity, minHeight: 300, maxHeight: 300, alignment: .top)
             .font(.system(size: 11))
             .controlSize(.small)
             .padding(.horizontal, 16)
@@ -2230,14 +2526,17 @@ struct GeneralOptionsView: View {
     @ObservedObject private var settings = AppSettings.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 3) {
 
             Toggle("Launch at Login", isOn: $settings.launchAtLogin)
+                .padding(.top, 8)
             Toggle("Always on Top", isOn: $settings.alwaysOnTop)
             Toggle("Peek-Through", isOn: $settings.peekEnabled)
             Toggle("Invert Pan", isOn: $settings.invertPan)
+            Toggle("Click-Through (keyboard-only)", isOn: $settings.clickThrough)
 
             Divider()
+                .padding(.top, 8)
 
             Text("PEEK-THROUGH")
                 .font(.system(size: 10, weight: .semibold))
@@ -2252,6 +2551,7 @@ struct GeneralOptionsView: View {
                         .monospacedDigit()
                 }
                 Slider(value: $settings.peekRadius, in: 30...260)
+                    .controlSize(.mini)
             }
 
             VStack(alignment: .leading, spacing: 2) {
@@ -2263,6 +2563,7 @@ struct GeneralOptionsView: View {
                         .monospacedDigit()
                 }
                 Slider(value: $settings.peekTransparency, in: 0...1)
+                    .controlSize(.mini)
             }
             .disabled(!settings.peekEnabled)
 
@@ -2275,7 +2576,9 @@ struct GeneralOptionsView: View {
                         .monospacedDigit()
                 }
                 Slider(value: $settings.baseTransparency, in: 0...0.9)
+                    .controlSize(.mini)
             }
+
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
@@ -2286,6 +2589,7 @@ struct GeneralOptionsView: View {
                         .monospacedDigit()
                 }
                 Slider(value: $settings.peekFade, in: 0...200)
+                    .controlSize(.mini)
             }
             .disabled(!settings.peekEnabled)
 
@@ -2293,16 +2597,16 @@ struct GeneralOptionsView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
 
-            Divider()
+            Spacer(minLength: 8)
 
-            HStack {
+            HStack(spacing: 16) {
                 Button("Change Map PDF…") { changePDF() }
-                Spacer()
                 Link(
                     "Download Stanford Map",
                     destination: URL(string: "https://mededucation.stanford.edu/pathways-download/")!
                 )
             }
+            .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
@@ -2376,6 +2680,50 @@ struct ShortcutOptionsView: View {
             Spacer()
             ShortcutRecorder(label: label, onCapture: onCapture)
                 .frame(width: 110, height: 22)
+        }
+    }
+}
+
+struct AnimationOptionsView: View {
+
+    @ObservedObject private var settings = AppSettings.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack {
+                    Text("Metabolism Speed")
+                    Spacer()
+                    Text(String(format: "%.1f /s", settings.metabolismStepsPerSecond))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(value: $settings.metabolismSpeed, in: 0...1)
+                    .disabled(settings.iconMode == .alwaysPause)
+            }
+
+            Toggle("Color atoms (O red · P green · S purple)", isOn: $settings.colorOxygen)
+            Toggle("Full carboxylate groups (TCA)", isOn: $settings.fullCarboxylate)
+            Toggle("Slide window in/out from corner", isOn: $settings.slideAnimation)
+
+            Text("The menu-bar icon walks glycolysis, the TCA cycle, the HMP shunt, and CoA-linked steps.")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack {
+                Text("Play")
+                Spacer()
+                Picker("", selection: $settings.iconModeRaw) {
+                    ForEach(IconMode.allCases) { mode in
+                        Text(mode.label).tag(mode.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+            }
         }
     }
 }

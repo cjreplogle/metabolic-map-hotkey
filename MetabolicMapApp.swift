@@ -503,7 +503,7 @@ final class MapFileManager {
         }
     }
 
-    func chooseMap(completion: @escaping (Bool) -> Void) {
+    func chooseMap(parent: NSWindow? = nil, completion: @escaping (Bool) -> Void) {
         let panel = NSOpenPanel()
         panel.title = "Select Your Metabolic Map PDF"
         panel.message = "Select the metabolic map PDF already stored on your Mac."
@@ -513,13 +513,22 @@ final class MapFileManager {
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.pdf]
 
-        panel.begin { response in
+        let handler: (NSApplication.ModalResponse) -> Void = { response in
             guard response == .OK, let url = panel.url else {
                 completion(false)
                 return
             }
             self.saveBookmark(for: url)
             completion(true)
+        }
+
+        // Attach as a sheet to the presenting window so it can't hide behind it
+        // (the setup/map windows float above a plain modeless panel).
+        if let parent {
+            panel.beginSheetModal(for: parent, completionHandler: handler)
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.begin(completionHandler: handler)
         }
     }
 }
@@ -1011,6 +1020,9 @@ final class SetupWindowController: NSObject {
     static let shared = SetupWindowController()
     private var window: NSWindow?
 
+    /// The presenting window, so the open panel can attach to it as a sheet.
+    var hostWindow: NSWindow? { window }
+
     func show(completion: @escaping () -> Void) {
 
         let hosting = NSHostingView(
@@ -1018,7 +1030,7 @@ final class SetupWindowController: NSObject {
         )
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 330),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 380),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -1062,12 +1074,20 @@ struct SetupView: View {
             Text("""
             This app does not include or redistribute the metabolic map PDF.
 
-            Select the copy of the map already stored on your Mac.
-            The app will remember its location for future launches.
+            Download the Stanford map below (if you don't have it yet), then
+            select your local copy. The app remembers it for future launches.
             """)
             .multilineTextAlignment(.center)
             .foregroundStyle(.secondary)
             .frame(maxWidth: 460)
+
+            Link(destination: URL(string: "https://mededucation.stanford.edu/pathways-download/")!) {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.down.circle")
+                    Text("Download the Stanford metabolic map")
+                }
+            }
+            .font(.callout)
 
             Button {
                 choosePDF()
@@ -1086,14 +1106,14 @@ struct SetupView: View {
             }
         }
         .padding(35)
-        .frame(width: 560, height: 330)
+        .frame(width: 560, height: 380)
     }
 
     private func choosePDF() {
 
         selecting = true
 
-        MapFileManager.shared.chooseMap { success in
+        MapFileManager.shared.chooseMap(parent: SetupWindowController.shared.hostWindow) { success in
 
             DispatchQueue.main.async {
 

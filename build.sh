@@ -56,9 +56,9 @@ cat > MetabolicMap.app/Contents/Info.plist <<'PLIST'
     <key>CFBundleIconFile</key>
     <string>AppIcon.icns</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.3</string>
+    <string>2.4</string>
     <key>CFBundleVersion</key>
-    <string>11</string>
+    <string>12</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>

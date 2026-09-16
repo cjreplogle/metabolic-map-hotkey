@@ -17,11 +17,12 @@ zoom, pan, and a cursor "peek-through" so you can glance at what's behind it.
 
 ## Download
 
-Grab the prebuilt app from the
-[latest release](https://github.com/cjreplogle/metabolic-map-hotkey/releases/latest):
+**[⬇ Download MetabolicMap.zip](https://github.com/cjreplogle/metabolic-map-hotkey/releases/latest/download/MetabolicMap.zip)**
+(always the latest release), or browse
+[all releases](https://github.com/cjreplogle/metabolic-map-hotkey/releases/latest).
 
-1. Download `MetabolicMap.zip`, unzip, and drag `MetabolicMap.app` into your
-   **Applications** folder.
+1. Unzip the download and drag `MetabolicMap.app` into your **Applications**
+   folder.
 2. Double-click it. Because the app isn't notarized by Apple, macOS shows a
    message like *"MetabolicMap Not Opened"* / *"Apple could not verify…"*.
    Click **Done** (do **not** click "Move to Trash").

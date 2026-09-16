@@ -20,13 +20,25 @@ zoom, pan, and a cursor "peek-through" so you can glance at what's behind it.
 Grab the prebuilt app from the
 [latest release](https://github.com/cjreplogle/metabolic-map-hotkey/releases/latest):
 
-1. Download `MetabolicMap.zip`, unzip, and move `MetabolicMap.app` to Applications.
-2. First launch: right-click the app → **Open** (it's signed with a personal
-   Apple Development certificate and isn't notarized, so Gatekeeper warns once).
-3. Pick your local map PDF when prompted.
-4. Grant Accessibility (below) so the global hotkeys work.
+1. Download `MetabolicMap.zip`, unzip, and drag `MetabolicMap.app` into your
+   **Applications** folder.
+2. Double-click it. Because the app isn't notarized by Apple, macOS shows a
+   message like *"MetabolicMap Not Opened"* / *"Apple could not verify…"*.
+   Click **Done** (do **not** click "Move to Trash").
+3. Open  → **System Settings → Privacy & Security**, scroll to the bottom, and
+   click **Open Anyway** next to *"MetabolicMap was blocked…"*. Confirm with
+   **Open Anyway** and your password / Touch ID.
+4. The app now opens (and every future launch opens normally — this is a
+   one-time step).
+5. Pick your local map PDF when prompted (or use the **Download the Stanford
+   metabolic map** link in the window).
+6. Grant Accessibility (below) so the global hotkeys work.
 
 Requires macOS 14+.
+
+> [!NOTE]
+> The extra Settings step is Apple's Gatekeeper, shown once for apps that aren't
+> notarized. It only happens on the very first launch.
 
 ## Permissions
 

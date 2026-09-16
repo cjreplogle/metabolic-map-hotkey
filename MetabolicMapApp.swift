@@ -102,6 +102,22 @@ final class AppSettings: ObservableObject {
     @Published var invertPan: Bool {
         didSet { defaults.set(invertPan, forKey: "invertPan") }
     }
+    // In-app "hot corner": moving the cursor into the chosen screen corner toggles
+    // the map (macOS's own Hot Corners can't launch apps, so this mimics it).
+    @Published var hotCornerEnabled: Bool {
+        didSet {
+            defaults.set(hotCornerEnabled, forKey: "hotCornerEnabled")
+            HotCornerManager.shared.reload()
+        }
+    }
+    // 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right.
+    @Published var hotCornerRaw: Int {
+        didSet {
+            defaults.set(hotCornerRaw, forKey: "hotCornerRaw")
+            HotCornerManager.shared.reload()
+        }
+    }
+    var hotCorner: ScreenCorner { ScreenCorner(rawValue: hotCornerRaw) ?? .topRight }
     // Click-through: the map ignores mouse events (clicks/scroll pass to the app
     // below) and hides its window buttons; adjust the view with keyboard shortcuts.
     @Published var clickThrough: Bool {
@@ -182,6 +198,8 @@ final class AppSettings: ObservableObject {
         peekTransparency = defaults.object(forKey: "peekTransparency") as? Double ?? 1
         peekFade = defaults.object(forKey: "peekFade") as? Double ?? 200
         invertPan = defaults.bool(forKey: "invertPan")
+        hotCornerEnabled = defaults.bool(forKey: "hotCornerEnabled")
+        hotCornerRaw = defaults.object(forKey: "hotCornerRaw") as? Int ?? ScreenCorner.topRight.rawValue
         clickThrough = defaults.bool(forKey: "clickThrough")
         colorOxygen = defaults.object(forKey: "colorOxygen") as? Bool ?? true
         fullCarboxylate = defaults.object(forKey: "fullCarboxylate") as? Bool ?? true
@@ -190,10 +208,12 @@ final class AppSettings: ObservableObject {
         baseTransparency = defaults.object(forKey: "baseTransparency") as? Double ?? 0.087
         metabolismSpeed = defaults.object(forKey: "metabolismSpeed") as? Double ?? 0.82
 
-        // Defaults: ⌘M (keyCode 46) and ⌥⌘F (keyCode 3).
+        // Defaults: ⌥⌘M (keyCode 46) and ⌥⌘F (keyCode 3). ⌥⌘M avoids the system
+        // ⌘M "Minimize" collision (a bare ⌘M would leak through and minimize the
+        // focused window).
         mapKeyCode = defaults.object(forKey: "mapKeyCode") as? Int ?? 46
-        mapModifiers = defaults.object(forKey: "mapModifiers") as? UInt ?? NSEvent.ModifierFlags.command.rawValue
-        mapLabel = defaults.string(forKey: "mapLabel") ?? "⌘M"
+        mapModifiers = defaults.object(forKey: "mapModifiers") as? UInt ?? Self.defaultModifiers
+        mapLabel = defaults.string(forKey: "mapLabel") ?? "⌥⌘M"
         findKeyCode = defaults.object(forKey: "findKeyCode") as? Int ?? 3
         findModifiers = defaults.object(forKey: "findModifiers") as? UInt ?? Self.defaultModifiers
         findLabel = defaults.string(forKey: "findLabel") ?? "⌥⌘F"
@@ -203,6 +223,136 @@ final class AppSettings: ObservableObject {
     var coreAlpha: CGFloat { CGFloat(1 - peekTransparency) }
     /// Resting alpha of the whole map window.
     var baseAlpha: CGFloat { CGFloat(1 - baseTransparency) }
+}
+
+enum ScreenCorner: Int, CaseIterable {
+    case topLeft = 0, topRight = 1, bottomLeft = 2, bottomRight = 3
+
+    var label: String {
+        switch self {
+        case .topLeft: return "Top-left"
+        case .topRight: return "Top-right"
+        case .bottomLeft: return "Bottom-left"
+        case .bottomRight: return "Bottom-right"
+        }
+    }
+}
+
+/// Watches the cursor and toggles the map when it rests in a chosen screen
+/// corner — an in-app stand-in for macOS Hot Corners (which can't launch apps).
+final class HotCornerManager {
+
+    static let shared = HotCornerManager()
+    private init() {}
+
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
+    private var hideTimer: Timer?
+    private var shownByHotCorner = false // only auto-hide maps that the corner opened
+    private let hotSize: CGFloat = 44     // trigger distance from the exact corner (pt)
+    private let hideGrace: TimeInterval = 0.45   // lets you move from corner onto the map
+
+    func start() { reload() }
+
+    /// Installs/removes the mouse monitors to match the current setting.
+    func reload() {
+        let on = AppSettings.shared.hotCornerEnabled
+        if on {
+            guard globalMonitor == nil else { return }
+            globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown]) {
+                [weak self] event in
+                if event.type == .leftMouseDown { self?.handleClick() } else { self?.handleMove() }
+            }
+            localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown]) {
+                [weak self] event in
+                if event.type == .leftMouseDown { self?.handleClick() } else { self?.handleMove() }
+                return event
+            }
+        } else {
+            if let g = globalMonitor { NSEvent.removeMonitor(g) }
+            if let l = localMonitor { NSEvent.removeMonitor(l) }
+            globalMonitor = nil
+            localMonitor = nil
+            hideTimer?.invalidate(); hideTimer = nil
+            shownByHotCorner = false
+        }
+    }
+
+    private func handleMove() {
+        let mwc = MapWindowController.shared
+        let inCorner = cursorInHotCorner()
+
+        if !mwc.isMapVisible {
+            shownByHotCorner = false
+        }
+
+        // Approaching the corner pokes a corner of the map out as a hint. Clicking
+        // it (handleClick) expands it — hovering never auto-opens.
+        if inCorner, !mwc.isMapVisible {
+            mwc.hotCornerPeek(corner: AppSettings.shared.hotCorner)
+        }
+
+        // Retract an uncommitted peek once the cursor leaves the corner (and the
+        // little poked-out corner), after a short grace.
+        if mwc.isPeekingMap {
+            if inCorner || cursorOverMap() {
+                hideTimer?.invalidate()
+                hideTimer = nil
+            } else if hideTimer == nil {
+                hideTimer = Timer.scheduledTimer(withTimeInterval: hideGrace, repeats: false) { _ in
+                    self.hideTimer = nil
+                    guard !self.cursorInHotCorner(), !self.cursorOverMap() else { return }
+                    if MapWindowController.shared.isPeekingMap {
+                        MapWindowController.shared.hotCornerRetract()
+                    }
+                }
+            }
+            return
+        }
+
+        // Committed full map: hide once the cursor leaves both corner and map.
+        if shownByHotCorner, mwc.isMapVisible {
+            if inCorner || cursorOverMap() {
+                hideTimer?.invalidate()
+                hideTimer = nil
+            } else if hideTimer == nil {
+                hideTimer = Timer.scheduledTimer(withTimeInterval: hideGrace, repeats: false) { [weak self] _ in
+                    guard let self else { return }
+                    self.hideTimer = nil
+                    guard !self.cursorInHotCorner(), !self.cursorOverMap() else { return }
+                    self.shownByHotCorner = false
+                    MapWindowController.shared.hideMap()
+                }
+            }
+        }
+    }
+
+    /// Clicking the little poked-out corner expands the map to full size.
+    private func handleClick() {
+        let mwc = MapWindowController.shared
+        guard mwc.isPeekingMap, cursorOverMap() else { return }
+        hideTimer?.invalidate(); hideTimer = nil
+        shownByHotCorner = true
+        mwc.hotCornerCommit()
+    }
+
+    private func cursorOverMap() -> Bool {
+        guard let frame = MapWindowController.shared.visibleMapFrame else { return false }
+        return frame.contains(NSEvent.mouseLocation)
+    }
+
+    private func cursorInHotCorner() -> Bool {
+        let p = NSEvent.mouseLocation
+        let corner = AppSettings.shared.hotCorner
+        for screen in NSScreen.screens {
+            let f = screen.frame
+            guard f.insetBy(dx: -1, dy: -1).contains(p) else { continue }
+            let cx = (corner == .topLeft || corner == .bottomLeft) ? f.minX : f.maxX
+            let cy = (corner == .topLeft || corner == .topRight) ? f.maxY : f.minY
+            if abs(p.x - cx) <= hotSize && abs(p.y - cy) <= hotSize { return true }
+        }
+        return false
+    }
 }
 
 /// Checks GitHub for a newer release and can download/install it in place.
@@ -377,6 +527,17 @@ func setWindowRestingFrame(_ window: NSWindow, _ frame: NSRect) {
 
 func windowIsSliding(_ window: NSWindow) -> Bool {
     slidingWindows.contains(ObjectIdentifier(window))
+}
+
+/// While suppressed, windowDidMove/Resize won't capture the frame as the resting
+/// position — used during the hot-corner peek so the off-screen peek frame isn't
+/// mistaken for home.
+func setWindowFrameSuppressed(_ window: NSWindow, _ suppressed: Bool) {
+    if suppressed {
+        slidingWindows.insert(ObjectIdentifier(window))
+    } else {
+        slidingWindows.remove(ObjectIdentifier(window))
+    }
 }
 
 private func cornerSlideOffset(for window: NSWindow, distance: CGFloat = 45) -> CGSize {
@@ -916,6 +1077,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         GlobalShortcutManager.shared.start()
         PreviousAppTracker.shared.start()
+        HotCornerManager.shared.start()
         UpdateChecker.shared.check()
 
         if MapFileManager.shared.resolveMapURL() == nil {
@@ -2120,12 +2282,30 @@ extension MapContainerView: NSSearchFieldDelegate {
     }
 }
 
+/// A window that can be positioned freely off-screen — macOS otherwise constrains
+/// titled windows on-screen, which would break the hot-corner peek (only a corner
+/// should show, with the rest tucked past the screen edge).
+final class FreeFrameWindow: NSWindow {
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+}
+
 final class MapWindowController: NSObject {
 
     static let shared = MapWindowController()
     private var window: NSWindow?
     private var pdfView: PDFView?
     private var container: MapContainerView?
+
+    // Where a normal (⌥⌘M / menu) open positions the map. The hot corner shows/
+    // expands at its own corner without disturbing this, so closing a hot-corner
+    // peek doesn't move the user's preferred open position.
+    private var preferredFrame: NSRect?
+    // True from a hot-corner peek until the next normal open, so frame changes the
+    // hot corner makes (incl. trailing windowDidMove notifications) don't get
+    // captured as the preferred open position.
+    private var hotCornerManaged = false
 
     // 3×3 grid position: column 0=left,1=center,2=right; row 0=top,1=middle,2=bottom.
     // Default matches the top-right launch position.
@@ -2143,30 +2323,52 @@ final class MapWindowController: NSObject {
     @discardableResult
     func show(activate: Bool = true) -> PDFView? {
 
-        guard let url = MapFileManager.shared.resolveMapURL() else {
-
-            SetupWindowController.shared.show {
-                self.show()
-            }
-
+        guard MapFileManager.shared.resolveMapURL() != nil else {
+            SetupWindowController.shared.show { self.show() }
             return nil
         }
 
-        if let existing = window {
-            presentWindow(existing, activate: activate, finalAlpha: AppSettings.shared.baseAlpha)
-            postVisibilityChanged()
-            return pdfView
+        guard window != nil || makeWindowIfNeeded() else { return nil }
+        guard let window else { return nil }
+
+        // A normal show is never a peek — clear any lingering peek state so the
+        // hot-corner auto-hide doesn't treat this window as a peek.
+        if isPeeking {
+            isPeeking = false
+            setWindowFrameSuppressed(window, false)
         }
+
+        // A normal open is no longer hot-corner managed; restore the preferred
+        // position even if the last thing on screen was a hot-corner map elsewhere.
+        hotCornerManaged = false
+        if let preferredFrame, !window.isVisible {
+            setWindowRestingFrame(window, preferredFrame)
+            window.setFrame(preferredFrame, display: false)
+        }
+
+        presentWindow(window, activate: activate, finalAlpha: AppSettings.shared.baseAlpha)
+        postVisibilityChanged()
+        return pdfView
+    }
+
+    /// Builds the map window (document, view, styling, position) without showing
+    /// it. Returns false if the PDF can't be opened. No-op if it already exists.
+    @discardableResult
+    private func makeWindowIfNeeded() -> Bool {
+
+        if window != nil { return true }
+
+        guard let url = MapFileManager.shared.resolveMapURL() else { return false }
 
         guard MapFileManager.shared.startAccessing(url) else {
             showFileError()
-            return nil
+            return false
         }
 
         guard let document = PDFDocument(url: url) else {
             MapFileManager.shared.stopAccessing(url)
             showFileError()
-            return nil
+            return false
         }
 
         let container = MapContainerView()
@@ -2191,7 +2393,7 @@ final class MapWindowController: NSObject {
 
         let contentSize = Self.contentSize(for: document)
 
-        let window = NSWindow(
+        let window = FreeFrameWindow(
             contentRect: NSRect(origin: .zero, size: contentSize),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
             backing: .buffered,
@@ -2241,11 +2443,10 @@ final class MapWindowController: NSObject {
         self.window = window
         self.pdfView = pdfView
         self.container = container
+        preferredFrame = window.frame   // default top-right home
 
         applyClickThrough()
-        presentWindow(window, activate: activate, finalAlpha: AppSettings.shared.baseAlpha)
-        postVisibilityChanged()
-        return pdfView
+        return true
     }
 
     func applyBaseTransparency() {
@@ -2318,12 +2519,156 @@ final class MapWindowController: NSObject {
     /// Same ⌥⌘M shortcut: hide the map if it's showing, otherwise show it on top
     /// WITHOUT stealing focus from the current app.
     func toggle() {
+        // A hot-corner peek is showing → the shortcut means "show it", so expand
+        // to the full map rather than hide.
+        if isPeeking {
+            hotCornerCommit()
+            return
+        }
         if let window, window.isVisible {
             container?.saveViewState()
             fadeOutWindow(window) { [weak self] in self?.postVisibilityChanged() }
         } else {
             show(activate: false)
         }
+    }
+
+    /// The map window's screen frame while visible (for hit-testing the cursor).
+    var visibleMapFrame: NSRect? {
+        guard let window, window.isVisible else { return nil }
+        return window.frame
+    }
+
+    /// Shows the map without stealing focus (no-op if already visible).
+    func showMap() {
+        guard !(window?.isVisible ?? false) else { return }
+        show(activate: false)
+    }
+
+    /// Hides the map if visible.
+    func hideMap() {
+        guard let window, window.isVisible else { return }
+        container?.saveViewState()
+        fadeOutWindow(window) { [weak self] in self?.postVisibilityChanged() }
+    }
+
+    // MARK: Hot-corner peek
+
+    private var isPeeking = false
+    /// True while only a corner of the map is poked out as a hot-corner hint.
+    var isPeekingMap: Bool { isPeeking }
+
+    /// Frame that leaves only a small `poke`-sized corner of the window showing at
+    /// the given screen corner (the rest tucked off the edge).
+    private func peekFrame(for corner: ScreenCorner, size: NSSize,
+                           screen: NSRect, poke: CGFloat = 48) -> NSRect {
+        let w = size.width, h = size.height
+        let x: CGFloat, y: CGFloat
+        switch corner {
+        case .topRight:    x = screen.maxX - poke;     y = screen.maxY - poke
+        case .topLeft:     x = screen.minX - w + poke; y = screen.maxY - poke
+        case .bottomRight: x = screen.maxX - poke;     y = screen.minY - h + poke
+        case .bottomLeft:  x = screen.minX - w + poke; y = screen.minY - h + poke
+        }
+        return NSRect(x: x, y: y, width: w, height: h)
+    }
+
+    private func cursorScreenFrame() -> NSRect {
+        let p = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.insetBy(dx: -1, dy: -1).contains(p) }
+        return (screen ?? NSScreen.main)?.frame ?? .zero
+    }
+
+    private func cursorVisibleFrame() -> NSRect {
+        let p = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { $0.frame.insetBy(dx: -1, dy: -1).contains(p) }
+        return (screen ?? NSScreen.main)?.visibleFrame ?? .zero
+    }
+
+    /// Full-size resting frame anchored to the given corner (with the standard
+    /// margin), so a hot-corner open expands into that corner instead of jumping
+    /// to the window's usual home position.
+    private func hotCornerFullFrame(for corner: ScreenCorner, size: NSSize) -> NSRect {
+        let vf = cursorVisibleFrame()
+        let m: CGFloat = 20
+        let w = size.width, h = size.height
+        let x: CGFloat, y: CGFloat
+        switch corner {
+        case .topLeft:     x = vf.minX + m;         y = vf.maxY - h - m
+        case .topRight:    x = vf.maxX - w - m;     y = vf.maxY - h - m
+        case .bottomLeft:  x = vf.minX + m;         y = vf.minY + m
+        case .bottomRight: x = vf.maxX - w - m;     y = vf.minY + m
+        }
+        return NSRect(x: x, y: y, width: w, height: h)
+    }
+
+    /// Pokes a corner of the map out from the hot corner as a reveal hint.
+    func hotCornerPeek(corner: ScreenCorner) {
+        guard makeWindowIfNeeded(), let window, !window.isVisible else { return }
+
+        setWindowRestingFrame(window, window.frame)   // remember home before peeking
+        setWindowFrameSuppressed(window, true)
+        isPeeking = true
+        hotCornerManaged = true
+
+        let peek = peekFrame(for: corner, size: window.frame.size, screen: cursorScreenFrame())
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        // Sit above the menu bar and capture clicks so the poked corner (which can
+        // overlap the clock/Control Center) doesn't fall through and open
+        // Notification Center. Restored on commit/retract.
+        window.level = .popUpMenu
+        window.ignoresMouseEvents = false
+        window.setFrame(peek, display: false)
+        window.alphaValue = 0
+        window.orderFrontRegardless()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().alphaValue = AppSettings.shared.baseAlpha
+        }
+        postVisibilityChanged()
+    }
+
+    /// Expands a peeked map into the hot corner it was revealed from (rather than
+    /// yanking it across to the window's usual home position).
+    func hotCornerCommit() {
+        guard isPeeking, let window else { return }
+        isPeeking = false
+        let size = windowRestingFrame(window).size
+        let target = hotCornerFullFrame(for: AppSettings.shared.hotCorner, size: size)
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.2
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            window.animator().setFrame(target, display: true)
+            window.animator().alphaValue = AppSettings.shared.baseAlpha
+        }, completionHandler: { [weak self] in
+            setWindowFrameSuppressed(window, false)
+            setWindowRestingFrame(window, target)   // this corner is now its home
+            window.level = AppSettings.shared.alwaysOnTop ? .floating : .normal
+            self?.applyClickThrough()   // restore the user's click-through setting
+        })
+    }
+
+    /// Retracts a peeked (uncommitted) map back off the corner and hides it.
+    func hotCornerRetract() {
+        guard isPeeking, let window else { return }
+        isPeeking = false
+        let off = peekFrame(for: AppSettings.shared.hotCorner, size: window.frame.size,
+                            screen: cursorScreenFrame(), poke: -8)
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0.16
+            context.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            window.animator().setFrame(off, display: true)
+            window.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            window.orderOut(nil)
+            window.alphaValue = 1
+            window.level = AppSettings.shared.alwaysOnTop ? .floating : .normal
+            window.setFrame(windowRestingFrame(window), display: false)
+            setWindowFrameSuppressed(window, false)
+            self?.applyClickThrough()
+            self?.postVisibilityChanged()
+        })
     }
 
     func close() {
@@ -2490,11 +2835,15 @@ extension MapWindowController: NSWindowDelegate {
     func windowDidMove(_ notification: Notification) {
         guard let window, !windowIsSliding(window) else { return }
         setWindowRestingFrame(window, window.frame)
+        // Only a genuine user move of a normally-opened map updates the preferred
+        // open position — not a hot-corner peek/commit.
+        if !hotCornerManaged { preferredFrame = window.frame }
     }
 
     func windowDidResize(_ notification: Notification) {
         guard let window, !windowIsSliding(window) else { return }
         setWindowRestingFrame(window, window.frame)
+        if !hotCornerManaged { preferredFrame = window.frame }
     }
 }
 
@@ -2630,6 +2979,18 @@ struct GeneralOptionsView: View {
             Toggle("Peek-Through", isOn: $settings.peekEnabled)
             Toggle("Invert Pan", isOn: $settings.invertPan)
             Toggle("Click-Through (keyboard-only)", isOn: $settings.clickThrough)
+
+            HStack(spacing: 8) {
+                Toggle("Hot Corner", isOn: $settings.hotCornerEnabled)
+                Picker("", selection: $settings.hotCornerRaw) {
+                    ForEach(ScreenCorner.allCases, id: \.rawValue) { corner in
+                        Text(corner.label).tag(corner.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .disabled(!settings.hotCornerEnabled)
+            }
 
             Divider()
                 .padding(.top, 8)

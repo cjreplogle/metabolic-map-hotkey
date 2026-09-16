@@ -17,9 +17,7 @@ zoom, pan, and a cursor "peek-through" so you can glance at what's behind it.
 
 ## Download
 
-**[⬇ Download MetabolicMap.zip](https://github.com/cjreplogle/metabolic-map-hotkey/releases/latest/download/MetabolicMap.zip)**
-(always the latest release), or browse
-[all releases](https://github.com/cjreplogle/metabolic-map-hotkey/releases/latest).
+**[Download MetabolicMap.zip](https://github.com/cjreplogle/metabolic-map-hotkey/releases/latest/download/MetabolicMap.zip)**
 
 1. Unzip the download and drag `MetabolicMap.app` into your **Applications**
    folder.
@@ -35,7 +33,7 @@ zoom, pan, and a cursor "peek-through" so you can glance at what's behind it.
    metabolic map** link in the window).
 6. Grant Accessibility (below) so the global hotkeys work.
 
-Requires macOS 14+.
+Requires macOS 14+. <a href=https://github.com/cjreplogle/metabolic-map-hotkey/releases/latest>Version History</a>
 
 > [!NOTE]
 > The extra Settings step is Apple's Gatekeeper, shown once for apps that aren't
